@@ -1,7 +1,10 @@
 using Dalamud.Game.Command;
 using Dalamud.IoC;
 using Dalamud.Plugin;
+using System;
 using System.IO;
+using System.Threading.Tasks;
+using WTP.Services;
 using Dalamud.Interface.Windowing;
 using Dalamud.Plugin.Services;
 using WTP.Windows;
@@ -30,11 +33,33 @@ public sealed class WTP : IDalamudPlugin
     {
         Configuration = PluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
 
-        // You might normally want to embed resources and load them from the manifest stream
-        var wtpImagePath = Path.Combine(PluginInterface.AssemblyLocation.Directory?.FullName!, "data", "icon.png");
+        // Determine path to icon image. Prefer data/icon.png but fall back to icon.png at assembly root.
+        var assemblyDir = PluginInterface.AssemblyLocation.Directory?.FullName ?? string.Empty;
+        var dataIconPath = Path.Combine(assemblyDir, "data", "icon.png");
+        var rootIconPath = Path.Combine(assemblyDir, "icon.png");
+        var wtpImagePath = dataIconPath;
 
-        VenueListWindow = new VenueListWindow(this, wtpImagePath);
-        SubmitVenueWindow = new SubmitVenueWindow(this);
+        if (File.Exists(dataIconPath))
+        {
+            Log.Information($"Using data icon at {dataIconPath}");
+            wtpImagePath = dataIconPath;
+        }
+        else if (File.Exists(rootIconPath))
+        {
+            Log.Information($"Using root icon at {rootIconPath}");
+            wtpImagePath = rootIconPath;
+        }
+        else
+        {
+            Log.Warning($"Could not find icon at {dataIconPath} or {rootIconPath}. Ensure data/icon.png is present and marked CopyToOutputDirectory in the .csproj.");
+            // keep default path so callers attempting to read it will get a predictable path
+            wtpImagePath = dataIconPath;
+        }
+
+        // Shared service instance used by both windows so submissions and fetches operate on the same source/cache.
+        var venueService = new VenueService(Configuration.VenueApiBaseUrl);
+        VenueListWindow = new VenueListWindow(this, wtpImagePath, venueService);
+        SubmitVenueWindow = new SubmitVenueWindow(this, venueService);
         WindowSystem.AddWindow(VenueListWindow);
         WindowSystem.AddWindow(SubmitVenueWindow);
 
@@ -76,5 +101,18 @@ public sealed class WTP : IDalamudPlugin
     }
 
     public void ToggleMainUi() => VenueListWindow.Toggle();
-    public void ToggleSubmitUi() => SubmitVenueWindow.Toggle();
+    public void ToggleSubmitUi() => _ = SubmitVenueWindow.OpenForCurrentUserAsync();
+
+    // Allow other components to request a refresh of the venue list.
+    public async Task RequestVenueRefreshAsync()
+    {
+        try
+        {
+            await VenueListWindow.RefreshAsync();
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Error while requesting venue refresh");
+        }
+    }
 }

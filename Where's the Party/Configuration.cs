@@ -10,8 +10,9 @@ public class Configuration : IPluginConfiguration
 
     public bool IsConfigWindowMovable { get; set; } = true;
     public bool SomePropertyToBeSavedAndWithADefault { get; set; } = true;
-    // Base URL for the venue API (e.g. Cloudflare Worker endpoint). Leave empty to disable network calls.
-    public string VenueApiBaseUrl { get; set; } = string.Empty;
+    // Base URL for the venue API (e.g. Cloudflare Worker endpoint). Set to your deployed Cloudflare Worker URL.
+    // Defaulted to the developer's worker for convenience; change as needed.
+    public string VenueApiBaseUrl { get; set; } = "https://wtp-backend.bsdgurl.workers.dev";
 
 
     // The below exists just to make saving less cumbersome okay

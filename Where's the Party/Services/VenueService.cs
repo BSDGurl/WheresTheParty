@@ -31,13 +31,28 @@ public class VenueService
         if (string.IsNullOrEmpty(_baseUrl)) return new List<Venue>();
 
         var resp = await _http.GetAsync(_baseUrl + "/venues");
-        resp.EnsureSuccessStatusCode();
         var json = await resp.Content.ReadAsStringAsync();
+        try
+        {
+            if (!resp.IsSuccessStatusCode)
+            {
+                WTP.Log?.Warning($"FetchVenuesAsync: GET returned {(int)resp.StatusCode} {resp.ReasonPhrase}. Body: {json}");
+                resp.EnsureSuccessStatusCode();
+            }
+        }
+        catch (Exception ex)
+        {
+            WTP.Log?.Error(ex, "FetchVenuesAsync: HTTP error");
+            throw;
+        }
+
+        WTP.Log?.Information($"FetchVenuesAsync: received {Math.Min(2000, json.Length)} chars of JSON");
         var opts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
         var list = JsonSerializer.Deserialize<List<Venue>>(json, opts) ?? new List<Venue>();
 
         // filter expired entries client-side
         var filtered = list.Where(v => !v.IsExpired).ToList();
+        WTP.Log?.Information($"FetchVenuesAsync: parsed {list.Count} venues, {filtered.Count} not expired");
         _cache.Clear();
         _cache.AddRange(filtered);
         return filtered;
@@ -56,6 +71,15 @@ public class VenueService
         var body = JsonSerializer.Serialize(v, opts);
         var content = new StringContent(body, Encoding.UTF8, "application/json");
         var resp = await _http.PostAsync(_baseUrl + "/venues", content);
+        var respBody = await resp.Content.ReadAsStringAsync();
+        if (!resp.IsSuccessStatusCode)
+        {
+            WTP.Log?.Warning($"SubmitVenueAsync: POST returned {(int)resp.StatusCode} {resp.ReasonPhrase}. Body: {respBody}");
+        }
+        else
+        {
+            WTP.Log?.Information($"SubmitVenueAsync: POST succeeded. Response: {respBody}");
+        }
         return resp.IsSuccessStatusCode;
     }
 }

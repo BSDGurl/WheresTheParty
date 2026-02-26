@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Windowing;
 using System.Linq;
+using System.Text.RegularExpressions;
 using WTP.Models;
 using WTP.Services;
 
@@ -19,14 +20,14 @@ public class SubmitVenueWindow : Window, IDisposable
     private string name = string.Empty;
     private string description = string.Empty;
     private string world = string.Empty;
-    private string category = string.Empty;
+    private string carrdUrl = string.Empty;
     private string address = string.Empty;
     private string tags = string.Empty;
     private int lengthMinutes = 60;
     private string statusMessage = string.Empty;
     private bool submitting = false;
 
-    // Wi‑Fi
+    // Wi-Fi
     private bool wifiLightless = false;
     private string lightlessSyncshellId = string.Empty;
     private string lightlessSyncshellPassword = string.Empty;
@@ -53,13 +54,21 @@ public class SubmitVenueWindow : Window, IDisposable
     private bool editingAddress = false; // toggles the address editor
     private bool usePlot = true;
     private bool useApartment = false;
-    private bool[] apartmentSelected = new bool[90];
-    private bool[] subdivisionSelected = new bool[90];
+    // Only one apartment or subdivision may be selected per listing
+    private int selectedApartment = -1; // 1-based index, -1 = none
+    private int selectedSubdivision = -1; // 1-based index, -1 = none
 
-    // Wi‑Fi UI
+    // Wi-Fi UI
     private bool showWifiOptions = false;
 
-    public SubmitVenueWindow(WTP plugin) : base("Submit Venue###SubmitVenueWindow")
+    // Weekly schedule
+    private bool[] openDays = new bool[7]; // 0=Sun .. 6=Sat
+    private int openHour = 20;
+    private int openMinute = 0;
+    private int closeHour = 23;
+    private int closeMinute = 0;
+
+    public SubmitVenueWindow(WTP plugin, VenueService venueService) : base("Submit Venue###SubmitVenueWindow")
     {
         Flags = ImGuiWindowFlags.NoCollapse;
         Size = new Vector2(520, 480);
@@ -67,7 +76,7 @@ public class SubmitVenueWindow : Window, IDisposable
 
         this.plugin = plugin;
         this.configuration = plugin.Configuration;
-        this.venueService = new VenueService(configuration.VenueApiBaseUrl);
+        this.venueService = venueService;
 
         // Hardcode DC -> worlds mapping so World is always a dropdown
         worldsByDc = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase)
@@ -95,7 +104,217 @@ public class SubmitVenueWindow : Window, IDisposable
         world = "Behemoth"; // default world name until populated
     }
 
+    private static string FormatHourLabel(int h)
+    {
+        var hour12 = h % 12;
+        if (hour12 == 0) hour12 = 12;
+        var ampm = h < 12 ? "AM" : "PM";
+        return $"{hour12} {ampm}";
+    }
+
+    private static string FormatTimeLabel(int h, int m)
+    {
+        var hour12 = h % 12;
+        if (hour12 == 0) hour12 = 12;
+        var ampm = h < 12 ? "AM" : "PM";
+        return $"{hour12}:{m:D2} {ampm}";
+    }
+
     public void Dispose() { }
+
+    // Populate the form fields from an existing venue
+    public void PopulateFromVenue(Venue v)
+    {
+        if (v == null) return;
+
+        name = v.Name ?? string.Empty;
+        description = v.Description ?? string.Empty;
+        carrdUrl = v.CarrdUrl ?? string.Empty;
+        tags = v.Tags != null ? string.Join(',', v.Tags) : string.Empty;
+        address = v.Address ?? string.Empty;
+        lengthMinutes = v.LengthMinutes > 0 ? v.LengthMinutes : lengthMinutes;
+
+        // Data center / world selection
+        if (!string.IsNullOrEmpty(v.DC))
+        {
+            var idx = dataCenters.FindIndex(x => string.Equals(x, v.DC, StringComparison.OrdinalIgnoreCase));
+            if (idx >= 0) selectedDcIndex = idx;
+        }
+        // set world selection if possible
+        var dcKey = dataCenters.ElementAtOrDefault(selectedDcIndex) ?? string.Empty;
+        if (!string.IsNullOrEmpty(v.World) && worldsByDc != null && worldsByDc.ContainsKey(dcKey))
+        {
+            var worlds = worldsByDc[dcKey];
+            var widx = worlds.FindIndex(x => string.Equals(x, v.World, StringComparison.OrdinalIgnoreCase));
+            if (widx >= 0) { selectedWorldIndex = widx; world = worlds.ElementAtOrDefault(selectedWorldIndex) ?? v.World; }
+            else world = v.World ?? world;
+        }
+        else
+        {
+            world = v.World ?? world;
+        }
+
+        // Try to parse apartment / subdivision / plot selection from the stored address so
+        // the editor reflects the existing selection. Handles addresses composed by
+        // ComposeDisplayAddress() or a few legacy formats like "Apt 5"/"Subdiv 5".
+        selectedApartment = -1;
+        selectedSubdivision = -1;
+        useApartment = false;
+        usePlot = true;
+        var addr = (v.Address ?? string.Empty).Trim();
+        if (!string.IsNullOrEmpty(addr))
+        {
+            // Split on the display separator ' > ' if present
+            var parts = addr.Split(new[] { '>' }, StringSplitOptions.RemoveEmptyEntries).Select(p => p.Trim()).ToList();
+            // If the composed display format was used, parts are: DC, World, District, "Title #N" or "W{n}" etc.
+            if (parts.Count >= 3)
+            {
+                // Try to find district index from part[2]
+                var districtName = parts[2];
+                var didx = housingDistricts.FindIndex(d => string.Equals(d, districtName, StringComparison.OrdinalIgnoreCase) || string.Equals(GetDistrictDisplay(d), districtName, StringComparison.OrdinalIgnoreCase));
+                if (didx >= 0) selectedDistrictIndex = didx;
+
+                // If there's a 4th part, it may contain apt/sub title or ward/plot
+                if (parts.Count >= 4)
+                {
+                    var fourth = parts[3];
+                    // Determine apt/sub titles for selected district
+                    string aptTitle = string.Empty, subdivTitle = string.Empty;
+                    switch (selectedDistrictIndex)
+                    {
+                        case 0: aptTitle = "Lily Hills"; subdivTitle = "Lily Hills Sub"; break;
+                        case 1: aptTitle = "Topmast"; subdivTitle = "Topmast Sub"; break;
+                        case 2: aptTitle = "Sultana's Breath"; subdivTitle = "Sultana's Breath Sub"; break;
+                        case 3: aptTitle = "Ingleside"; subdivTitle = "Ingleside Sub"; break;
+                        case 4: aptTitle = "Kobai Goten"; subdivTitle = "Kobai Goten Sub"; break;
+                    }
+
+                    // Match patterns like "Kobai Goten #5" or "Lily Hills #12"
+                    var m = Regex.Match(fourth, @"#\s*(\d+)");
+                    if (m.Success && int.TryParse(m.Groups[1].Value, out var num))
+                    {
+                        // Decide if the title indicates subdiv or apt
+                        if (!string.IsNullOrEmpty(subdivTitle) && fourth.StartsWith(subdivTitle, StringComparison.OrdinalIgnoreCase))
+                        {
+                            selectedSubdivision = num;
+                            useApartment = true;
+                            usePlot = false;
+                        }
+                        else if (!string.IsNullOrEmpty(aptTitle) && fourth.StartsWith(aptTitle, StringComparison.OrdinalIgnoreCase))
+                        {
+                            selectedApartment = num;
+                            useApartment = true;
+                            usePlot = false;
+                        }
+                        else
+                        {
+                            // Fallback: if the fragment contains the word 'Subdiv' or 'Sub' treat as subdivision
+                            if (fourth.IndexOf("subd", StringComparison.OrdinalIgnoreCase) >= 0 || fourth.IndexOf("sub", StringComparison.OrdinalIgnoreCase) >= 0)
+                            {
+                                selectedSubdivision = num;
+                                useApartment = true;
+                                usePlot = false;
+                            }
+                            else
+                            {
+                                // treat as apartment number but leave title unknown
+                                selectedApartment = num;
+                                useApartment = true;
+                                usePlot = false;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // Try to parse ward/plot like "W18" or "P35" or "Ward 18 > Plot 35"
+                        var wardMatch = Regex.Match(fourth, "W\\s*(\\d+)", RegexOptions.IgnoreCase);
+                        if (wardMatch.Success && int.TryParse(wardMatch.Groups[1].Value, out var wv)) selectedWard = wv;
+                        // If more parts, try to read plot
+                        if (parts.Count >= 5)
+                        {
+                            var fifth = parts[4];
+                            var plotMatch = Regex.Match(fifth, "P\\s*(\\d+)", RegexOptions.IgnoreCase);
+                            if (plotMatch.Success && int.TryParse(plotMatch.Groups[1].Value, out var pv)) selectedPlot = pv;
+                        }
+                    }
+                }
+            }
+            else
+            {
+                // legacy formats: look for explicit "Apt" or "Subdiv" tokens
+                var mApt = Regex.Match(addr, "Apt(?:s)?\\s*#?\\s*(\\d+)", RegexOptions.IgnoreCase);
+                if (mApt.Success && int.TryParse(mApt.Groups[1].Value, out var an)) { selectedApartment = an; useApartment = true; usePlot = false; }
+                var mSub = Regex.Match(addr, "Subdiv(?:ision)?\\s*#?\\s*(\\d+)", RegexOptions.IgnoreCase);
+                if (mSub.Success && int.TryParse(mSub.Groups[1].Value, out var sn)) { selectedSubdivision = sn; useApartment = true; usePlot = false; }
+            }
+        }
+
+        // Wi-Fi options
+        wifiLightless = (v.WifiOptions & WifiOption.Lightless) == WifiOption.Lightless;
+        wifiPlayerSync = (v.WifiOptions & WifiOption.PlayerSync) == WifiOption.PlayerSync;
+        wifiSnowCloak = (v.WifiOptions & WifiOption.SnowCloak) == WifiOption.SnowCloak;
+        lightlessSyncshellId = v.LightlessSyncshellId ?? string.Empty;
+        lightlessSyncshellPassword = v.LightlessSyncshellPassword ?? string.Empty;
+        playerSyncSyncshellId = v.PlayerSyncSyncshellId ?? string.Empty;
+        playerSyncSyncshellPassword = v.PlayerSyncSyncshellPassword ?? string.Empty;
+        snowCloakSyncshellId = v.SnowCloakSyncshellId ?? string.Empty;
+        snowCloakSyncshellPassword = v.SnowCloakSyncshellPassword ?? string.Empty;
+
+        // Restore schedule fields if present
+        if (v.OpenDaysMask != 0)
+        {
+            for (var i = 0; i < 7; ++i) openDays[i] = (v.OpenDaysMask & (1 << i)) != 0;
+            var ot = Math.Max(0, Math.Min(24 * 60 - 1, v.OpenTimeMinutesLocal));
+            openHour = ot / 60; openMinute = ot % 60;
+            var ct = Math.Max(0, Math.Min(24 * 60 - 1, v.CloseTimeMinutesLocal));
+            closeHour = ct / 60; closeMinute = ct % 60;
+            usePlot = false; useApartment = true;
+        }
+    }
+
+    // Clear the form to defaults
+    public void ClearForm()
+    {
+        name = string.Empty;
+        description = string.Empty;
+        carrdUrl = string.Empty;
+        tags = string.Empty;
+        address = string.Empty;
+        lengthMinutes = 60;
+        wifiLightless = wifiPlayerSync = wifiSnowCloak = false;
+        lightlessSyncshellId = lightlessSyncshellPassword = string.Empty;
+        playerSyncSyncshellId = playerSyncSyncshellPassword = string.Empty;
+        snowCloakSyncshellId = snowCloakSyncshellPassword = string.Empty;
+        selectedApartment = -1;
+        selectedSubdivision = -1;
+        for (var i = 0; i < openDays.Length; ++i) openDays[i] = false;
+        openHour = 20; openMinute = 0; closeHour = 23; closeMinute = 0;
+    }
+
+    // Fetch current user's listing (if any), populate the form, and open the submit window.
+    public async Task OpenForCurrentUserAsync()
+    {
+        try
+        {
+            var currentOwner = WTP.ClientState?.LocalPlayer?.Name?.ToString() ?? string.Empty;
+            var list = await venueService.FetchVenuesAsync();
+            var usersListing = list.FirstOrDefault(x => !string.IsNullOrEmpty(x.Owner) && string.Equals(x.Owner, currentOwner, StringComparison.OrdinalIgnoreCase));
+            if (usersListing != null)
+            {
+                PopulateFromVenue(usersListing);
+            }
+            else
+            {
+                ClearForm();
+            }
+        }
+        catch
+        {
+            ClearForm();
+        }
+
+        if (!IsOpen) Toggle();
+    }
 
     private void PopulateWorldsFromLumina()
     {
@@ -162,9 +381,9 @@ public class SubmitVenueWindow : Window, IDisposable
         ImGui.TableNextRow(); ImGui.TableSetColumnIndex(0); ImGui.TextUnformatted("Venue Name");
         ImGui.TableSetColumnIndex(1); ImGui.InputText("##VenueName", ref name, 50);
 
-        // Description
+        // Description (allow longer text)
         ImGui.TableNextRow(); ImGui.TableSetColumnIndex(0); ImGui.TextUnformatted("Description");
-        ImGui.TableSetColumnIndex(1); ImGui.InputTextMultiline("##VenueDescription", ref description, 250, new Vector2(-1, 80));
+        ImGui.TableSetColumnIndex(1); ImGui.InputTextMultiline("##VenueDescription", ref description, 1500, new Vector2(-1, 80));
 
         // Address (composed)
         ImGui.TableNextRow(); ImGui.TableSetColumnIndex(0); ImGui.TextUnformatted("Address");
@@ -172,7 +391,15 @@ public class SubmitVenueWindow : Window, IDisposable
         var composed = string.IsNullOrWhiteSpace(address) ? ComposeDisplayAddress() : address;
         ImGui.TextUnformatted(composed);
         ImGui.SameLine();
-        if (ImGui.SmallButton(editingAddress ? "Done##Addr" : "Edit##Addr")) editingAddress = !editingAddress;
+        if (ImGui.SmallButton(editingAddress ? "Done##Addr" : "Edit##Addr"))
+        {
+            // If we are finishing address editing, save the composed address into the address field
+            if (editingAddress)
+            {
+                address = ComposeDisplayAddress();
+            }
+            editingAddress = !editingAddress;
+        }
 
         if (editingAddress)
         {
@@ -287,9 +514,21 @@ public class SubmitVenueWindow : Window, IDisposable
                 for (var i = 0; i < 90; ++i)
                 {
                     ImGui.PushID(i);
-                    ImGui.Checkbox($"{i+1}", ref apartmentSelected[i]);
+                    // Radio buttons for single-select apartment/subdivision. Values are 1-based.
+                    // Use hidden-id suffixes so the two columns don't collide (same visible label)
+                    var aptLabel = $"{i+1}##apt{i}";
+                    var subLabel = $"{i+1}##sub{i}";
+                    if (ImGui.RadioButton(aptLabel, ref selectedApartment, i + 1))
+                    {
+                        // selecting an apartment clears subdivision
+                        selectedSubdivision = -1;
+                    }
                     ImGui.NextColumn();
-                    ImGui.Checkbox($"{i+1}", ref subdivisionSelected[i]);
+                    if (ImGui.RadioButton(subLabel, ref selectedSubdivision, i + 1))
+                    {
+                        // selecting a subdivision clears apartment
+                        selectedApartment = -1;
+                    }
                     ImGui.NextColumn();
                     ImGui.PopID();
                 }
@@ -298,17 +537,107 @@ public class SubmitVenueWindow : Window, IDisposable
             }
         }
 
-        // Category
-        ImGui.TableNextRow(); ImGui.TableSetColumnIndex(0); ImGui.TextUnformatted("Category");
-        ImGui.TableSetColumnIndex(1); ImGui.InputText("##Category", ref category, 32);
+        // Carrd URL
+        ImGui.TableNextRow(); ImGui.TableSetColumnIndex(0); ImGui.TextUnformatted("Carrd URL");
+        ImGui.TableSetColumnIndex(1); ImGui.InputText("##CarrdUrl", ref carrdUrl, 256);
+
+        // Schedule (separate from address editing)
+        ImGui.TableNextRow(); ImGui.TableSetColumnIndex(0); ImGui.TextUnformatted("Open Days");
+        ImGui.TableSetColumnIndex(1);
+        var dayNames = new[] { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+        for (var d = 0; d < 7; ++d)
+        {
+            ImGui.PushID(d + 300);
+            ImGui.Checkbox(dayNames[d], ref openDays[d]);
+            ImGui.SameLine();
+            ImGui.PopID();
+        }
+        ImGui.NewLine();
+        if (ImGui.SmallButton("Weekdays"))
+        {
+            for (var i = 0; i < 7; ++i) openDays[i] = i >= 1 && i <= 5;
+        }
+        ImGui.SameLine();
+        if (ImGui.SmallButton("Weekends"))
+        {
+            for (var i = 0; i < 7; ++i) openDays[i] = (i == 0 || i == 6);
+        }
+        ImGui.SameLine();
+        if (ImGui.SmallButton("Every Day"))
+        {
+            for (var i = 0; i < 7; ++i) openDays[i] = true;
+        }
+
+        ImGui.TableNextRow(); ImGui.TableSetColumnIndex(0); ImGui.TextUnformatted("Open Time (local)");
+        ImGui.TableSetColumnIndex(1);
+        // Hour dropdown (show 12-hour labels with AM/PM)
+        ImGui.SetNextItemWidth(52f);
+        if (ImGui.BeginCombo("##OpenHour", FormatHourLabel(openHour)))
+        {
+            for (var h = 0; h < 24; ++h)
+            {
+                var label = FormatHourLabel(h);
+                var sel = h == openHour;
+                if (ImGui.Selectable(label, sel)) openHour = h;
+                if (sel) ImGui.SetItemDefaultFocus();
+            }
+            ImGui.EndCombo();
+        }
+        ImGui.SameLine(); ImGui.TextUnformatted(":" ); ImGui.SameLine();
+        // Minute dropdown (compact increments)
+        var minuteOptions = new[] { 0, 15, 30, 45 };
+        ImGui.SetNextItemWidth(48f);
+        if (ImGui.BeginCombo("##OpenMinute", openMinute.ToString("D2")))
+        {
+            foreach (var mVal in minuteOptions)
+            {
+                var sel = mVal == openMinute;
+                if (ImGui.Selectable(mVal.ToString("D2"), sel)) openMinute = mVal;
+                if (sel) ImGui.SetItemDefaultFocus();
+            }
+            ImGui.EndCombo();
+        }
+        ImGui.SameLine(); ImGui.TextUnformatted(FormatTimeLabel(openHour, openMinute));
+
+        ImGui.TableNextRow(); ImGui.TableSetColumnIndex(0); ImGui.TextUnformatted("Close Time (local)");
+        ImGui.TableSetColumnIndex(1);
+        ImGui.SetNextItemWidth(52f);
+        if (ImGui.BeginCombo("##CloseHour", FormatHourLabel(closeHour)))
+        {
+            for (var h = 0; h < 24; ++h)
+            {
+                var label = FormatHourLabel(h);
+                var sel = h == closeHour;
+                if (ImGui.Selectable(label, sel)) closeHour = h;
+                if (sel) ImGui.SetItemDefaultFocus();
+            }
+            ImGui.EndCombo();
+        }
+        ImGui.SameLine(); ImGui.TextUnformatted(":" ); ImGui.SameLine();
+        ImGui.SetNextItemWidth(48f);
+        if (ImGui.BeginCombo("##CloseMinute", closeMinute.ToString("D2")))
+        {
+            foreach (var mVal in minuteOptions)
+            {
+                var sel = mVal == closeMinute;
+                if (ImGui.Selectable(mVal.ToString("D2"), sel)) closeMinute = mVal;
+                if (sel) ImGui.SetItemDefaultFocus();
+            }
+            ImGui.EndCombo();
+        }
+        ImGui.SameLine(); ImGui.TextUnformatted(FormatTimeLabel(closeHour, closeMinute));
 
         // Tags
         ImGui.TableNextRow(); ImGui.TableSetColumnIndex(0); ImGui.TextUnformatted("Tags");
         ImGui.TableSetColumnIndex(1); ImGui.InputText("##Tags", ref tags, 64);
 
-        // Length
+        // Length (minutes) - limit to 8 hours (480 minutes)
         ImGui.TableNextRow(); ImGui.TableSetColumnIndex(0); ImGui.TextUnformatted("Length (minutes)");
-        ImGui.TableSetColumnIndex(1); ImGui.InputInt("##LengthMinutes", ref lengthMinutes);
+        ImGui.TableSetColumnIndex(1);
+        // Use a slider for length between 1 and 480 minutes (8 hours)
+        ImGui.SliderInt("##LengthMinutes", ref lengthMinutes, 1, 480);
+        // Show selected minutes and equivalent hours
+        ImGui.SameLine(); ImGui.TextColored(new System.Numerics.Vector4(0.7f,0.7f,0.7f,1f), $"{lengthMinutes} min ({(lengthMinutes/60.0):F2}h)");
 
         // padding
         ImGui.TableNextRow(); ImGui.TableSetColumnIndex(0); ImGui.TextUnformatted(string.Empty);
@@ -345,8 +674,22 @@ public class SubmitVenueWindow : Window, IDisposable
 
         // Submit
         ImGui.TableNextRow(); ImGui.TableSetColumnIndex(0); ImGui.TextUnformatted(string.Empty); ImGui.TableSetColumnIndex(1);
-        if (submitting) ImGui.TextUnformatted(statusMessage);
-        else if (ImGui.Button("Submit")) { submitting = true; statusMessage = "Submitting..."; _ = SubmitAsync(); }
+        if (!submitting)
+        {
+            if (ImGui.Button("Submit")) { submitting = true; statusMessage = "Submitting..."; _ = SubmitAsync(); }
+        }
+        else
+        {
+            // simple visual disabled state while submitting
+            ImGui.TextUnformatted("Submitting...");
+        }
+
+        // show last status message (success/failure/error)
+        if (!string.IsNullOrEmpty(statusMessage))
+        {
+            ImGui.Separator();
+            ImGui.TextUnformatted(statusMessage);
+        }
 
         ImGui.EndTable();
     }
@@ -356,11 +699,40 @@ public class SubmitVenueWindow : Window, IDisposable
         var district = GetDistrictDisplay(housingDistricts.ElementAtOrDefault(selectedDistrictIndex) ?? string.Empty);
         if (useApartment)
         {
-            var apts = Enumerable.Range(1, 90).Where(i => apartmentSelected[i - 1]).Select(i => i.ToString()).ToList();
-            var subs = Enumerable.Range(1, 90).Where(i => subdivisionSelected[i - 1]).Select(i => i.ToString()).ToList();
-            var parts = new List<string> { dataCenters.ElementAtOrDefault(selectedDcIndex) ?? string.Empty, world, district, $"W{selectedWard}" };
-            if (apts.Count > 0) parts.Add($"Apt(s) {string.Join(',', apts)}");
-            if (subs.Count > 0) parts.Add($"Subdiv(s) {string.Join(',', subs)}");
+            // Determine apartment/subdivision titles based on district
+            string aptTitle = string.Empty, subdivTitle = string.Empty;
+            switch (selectedDistrictIndex)
+            {
+                case 0: // Lavender Beds
+                    aptTitle = "Lily Hills"; subdivTitle = "Lily Hills Subs"; break;
+                case 1: // Mist
+                    aptTitle = "Topmast"; subdivTitle = "Topmast Subs"; break;
+                case 2: // The Goblet
+                    aptTitle = "Sultana's Breath"; subdivTitle = "Sultana's Breath Subs"; break;
+                case 3: // Empyreum
+                    aptTitle = "Ingleside"; subdivTitle = "Ingleside Subs"; break;
+                case 4: // Shirogane
+                    aptTitle = "Kobai Goten"; subdivTitle = "Kobai Goten Subs"; break;
+            }
+
+            var parts = new List<string> { dataCenters.ElementAtOrDefault(selectedDcIndex) ?? string.Empty, world, district };
+
+            // Use single-selection indices for apartment/subdivision (1-based, -1 = none)
+            if (selectedSubdivision != -1 && !string.IsNullOrEmpty(subdivTitle))
+            {
+                parts.Add($"{subdivTitle} #{selectedSubdivision}");
+            }
+            else if (selectedApartment != -1 && !string.IsNullOrEmpty(aptTitle))
+            {
+                parts.Add($"{aptTitle} #{selectedApartment}");
+            }
+            else
+            {
+                // fallback to ward/plot style if no apartment/subdivision selected
+                parts.Add($"W{selectedWard}");
+                parts.Add($"P{selectedPlot}");
+            }
+
             return string.Join(" > ", parts.Where(p => !string.IsNullOrEmpty(p)));
         }
 
@@ -380,19 +752,13 @@ public class SubmitVenueWindow : Window, IDisposable
     private string GetSubmittedAddress()
     {
         if (editingAddress && !string.IsNullOrWhiteSpace(address)) return address; // custom override
-        if (useApartment)
+        // For submission prefer the composed, user-visible address format (matches listing display)
+        if (useApartment || usePlot)
         {
-            var apts = Enumerable.Range(1, 90).Where(i => apartmentSelected[i - 1]).Select(i => i.ToString()).ToList();
-            var subs = Enumerable.Range(1, 90).Where(i => subdivisionSelected[i - 1]).Select(i => i.ToString()).ToList();
-            var parts = new List<string> { world, housingDistricts.ElementAtOrDefault(selectedDistrictIndex) ?? string.Empty, $"Ward {selectedWard}" };
-            if (apts.Count > 0) parts.Add($"Apt(s) {string.Join(',', apts)}");
-            if (subs.Count > 0) parts.Add($"Subdiv(s) {string.Join(',', subs)}");
-            return string.Join(", ", parts.Where(p => !string.IsNullOrEmpty(p)));
+            return ComposeDisplayAddress();
         }
 
-        return usePlot
-            ? $"{world}, {housingDistricts.ElementAtOrDefault(selectedDistrictIndex) ?? string.Empty}, Ward {selectedWard}, Plot {selectedPlot}"
-            : address;
+        return address;
     }
 
     private async Task SubmitAsync()
@@ -406,14 +772,19 @@ public class SubmitVenueWindow : Window, IDisposable
                 World = world,
                 DC = dataCenters.ElementAtOrDefault(selectedDcIndex) ?? string.Empty,
                 Address = GetSubmittedAddress(),
-                Category = category,
+                CarrdUrl = carrdUrl ?? string.Empty,
                 Tags = tags.Split(',').Select(t => t.Trim()).Where(t => t.Length > 0).ToList(),
                 Description = description,
                 Owner = string.Empty,
                 LastUpdatedUtc = DateTime.UtcNow,
-                LengthMinutes = Math.Max(1, lengthMinutes),
+                LengthMinutes = Math.Max(1, Math.Min(lengthMinutes, 480)),
+                // OpensAtUtc/ClosesAtUtc will be set below based on selected days/times converted to UTC
                 OpensAtUtc = DateTime.UtcNow,
-                ClosesAtUtc = DateTime.UtcNow.AddHours(1)
+                ClosesAtUtc = DateTime.UtcNow.AddHours(1),
+                // persist schedule info (local minutes)
+                OpenDaysMask = Enumerable.Range(0,7).Where(i => openDays[i]).Aggregate(0, (acc, i) => acc | (1 << i)),
+                OpenTimeMinutesLocal = Math.Max(0, Math.Min(24*60-1, openHour*60 + openMinute)),
+                CloseTimeMinutesLocal = Math.Max(0, Math.Min(24*60-1, closeHour*60 + closeMinute))
             };
 
             WifiOption options = WifiOption.None;
@@ -429,8 +800,106 @@ public class SubmitVenueWindow : Window, IDisposable
             v.SnowCloakSyncshellId = snowCloakSyncshellId ?? string.Empty;
             v.SnowCloakSyncshellPassword = snowCloakSyncshellPassword ?? string.Empty;
 
+            // Determine current player name to mark ownership
+            // LocalPlayer.Name is a SeString; convert to string. IClientState.LocalPlayer is marked obsolete but still available.
+            string currentOwner = WTP.ClientState?.LocalPlayer?.Name?.ToString() ?? string.Empty;
+            // No reliable Name on IPlayerState across Dalamud versions; keep client-local fallback only
+            v.Owner = currentOwner;
+
+            // Check for duplicates and existing ownership
+            try
+            {
+                var existing = (await venueService.FetchVenuesAsync()) ?? new List<Venue>();
+                // Find by name (case-insensitive)
+                var sameName = existing.FirstOrDefault(x => string.Equals(x.Name?.Trim(), v.Name?.Trim(), StringComparison.OrdinalIgnoreCase));
+                if (sameName != null)
+                {
+                    // If the same owner, treat as update; otherwise reject
+                    if (!string.IsNullOrEmpty(sameName.Owner) && string.Equals(sameName.Owner, currentOwner, StringComparison.OrdinalIgnoreCase))
+                    {
+                        v.Id = sameName.Id; // update owner's existing listing with same name
+                    }
+                    else
+                    {
+                        statusMessage = "A venue with that name already exists.";
+                        submitting = false;
+                        return;
+                    }
+                }
+
+                // Ensure one entry per user: if the user already has a different listing, update it instead of creating a new one
+                var usersListing = existing.FirstOrDefault(x => !string.IsNullOrEmpty(x.Owner) && string.Equals(x.Owner, currentOwner, StringComparison.OrdinalIgnoreCase));
+                if (usersListing != null && usersListing.Id != v.Id)
+                {
+                    // Update the user's existing listing (overwrite)
+                    v.Id = usersListing.Id;
+                }
+            }
+            catch
+            {
+                // If checking fails, continue and let the submit attempt proceed; the server will enforce uniqueness if necessary
+            }
+
+            // Calculate actual opening/closing UTC datetimes based on submitter's local time and selected days
+            try
+            {
+                var daysMask = v.OpenDaysMask;
+                if (daysMask == 0)
+                {
+                    // no schedule selected: fall back to immediate open/length
+                    v.OpensAtUtc = DateTime.UtcNow;
+                    v.ClosesAtUtc = DateTime.UtcNow.AddMinutes(v.LengthMinutes);
+                }
+                else
+                {
+                    var nowLocal = DateTime.Now;
+                    DateTime? nextOpenLocal = null;
+                    for (var offset = 0; offset < 7; ++offset)
+                    {
+                        var check = nowLocal.Date.AddDays(offset);
+                        var dow = (int)check.DayOfWeek; // 0..6
+                        if ((daysMask & (1 << dow)) == 0) continue;
+                        // construct candidate local open time on that date
+                        var openMinutes = v.OpenTimeMinutesLocal;
+                        var openHourCandidate = openMinutes / 60;
+                        var openMinCandidate = openMinutes % 60;
+                        var candidate = new DateTime(check.Year, check.Month, check.Day, openHourCandidate, openMinCandidate, 0, DateTimeKind.Local);
+                        if (candidate >= nowLocal || offset > 0)
+                        {
+                            nextOpenLocal = candidate;
+                            break;
+                        }
+                    }
+                    if (!nextOpenLocal.HasValue) // should not happen, but fallback
+                        nextOpenLocal = DateTime.Now;
+
+                    // compute close local: on same day unless close time <= open time -> next day
+                    var closeMinutes = v.CloseTimeMinutesLocal;
+                    var closeHourCandidate = closeMinutes / 60;
+                    var closeMinCandidate = closeMinutes % 60;
+                    var closeLocal = new DateTime(nextOpenLocal.Value.Year, nextOpenLocal.Value.Month, nextOpenLocal.Value.Day, closeHourCandidate, closeMinCandidate, 0, DateTimeKind.Local);
+                    if (closeLocal <= nextOpenLocal.Value)
+                    {
+                        closeLocal = closeLocal.AddDays(1);
+                    }
+
+                    v.OpensAtUtc = nextOpenLocal.Value.ToUniversalTime();
+                    v.ClosesAtUtc = closeLocal.ToUniversalTime();
+                }
+            }
+            catch { }
+
             var ok = await venueService.SubmitVenueAsync(v);
-            statusMessage = ok ? "Submitted successfully." : "Submission failed.";
+            if (ok)
+            {
+                statusMessage = "Submitted successfully.";
+                // Refresh the shared venue list so the new entry appears immediately.
+                try { await plugin.RequestVenueRefreshAsync(); } catch { }
+            }
+            else
+            {
+                statusMessage = "Submission failed.";
+            }
         }
         catch (Exception ex)
         {

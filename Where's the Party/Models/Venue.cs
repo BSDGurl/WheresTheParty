@@ -11,7 +11,9 @@ public partial class Venue
     public string World { get; set; } = string.Empty;
     public string DC { get; set; } = string.Empty;
     public string Address { get; set; } = string.Empty;
-    public string Category { get; set; } = string.Empty;
+    // Category was replaced by an explicit Carrd URL field for listings that point to a Carrd page.
+    // Keep free-form tags for other classification.
+    public string CarrdUrl { get; set; } = string.Empty;
     public List<string> Tags { get; set; } = new();
 
     // UTC timestamps for when the venue opens and closes
@@ -30,11 +32,18 @@ public partial class Venue
     // Computed expiration time in UTC. Clients should set this when creating a listing.
     public DateTime ExpiresAtUtc { get; set; }
 
+    // Optional weekly schedule information. Stored as local-times relative to the submitter's system.
+    // OpenDaysMask: bitmask where bit 0 = Sunday, bit 1 = Monday, ... bit 6 = Saturday.
+    // OpenTimeMinutesLocal / CloseTimeMinutesLocal: minutes after midnight in the submitter's local time.
+    public int OpenDaysMask { get; set; } = 0;
+    public int OpenTimeMinutesLocal { get; set; } = 20 * 60; // default 20:00
+    public int CloseTimeMinutesLocal { get; set; } = 23 * 60; // default 23:00
+
     // Helper
     public bool IsExpired => DateTime.UtcNow >= ExpiresAtUtc;
 }
 
-// Wi‑Fi options supported by listings. Flags allow combinations (e.g. Lightless + PlayerSync).
+// Wi-Fi options supported by listings. Flags allow combinations (e.g. Lightless + PlayerSync).
 [Flags]
 public enum WifiOption
 {
@@ -47,7 +56,7 @@ public enum WifiOption
 // Extension of Venue to include connectivity details
 public partial class Venue
 {
-    // Which Wi‑Fi/sync options are available for this listing
+    // Which Wi-Fi/sync options are available for this listing
     public WifiOption WifiOptions { get; set; } = WifiOption.None;
 
     // Optional Syncshell details (may be empty). These are short strings and may contain sensitive info.
