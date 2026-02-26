@@ -21,10 +21,7 @@ public class VenueService
         _http = new HttpClient();
     }
 
-    public IReadOnlyList<Venue> GetCachedVenues()
-    {
-        return _cache.Where(v => !v.IsExpired).ToList();
-    }
+    public IReadOnlyList<Venue> GetCachedVenues() => _cache.Where(v => !v.IsExpired).ToList();
 
     public async Task<List<Venue>> FetchVenuesAsync()
     {
@@ -32,18 +29,10 @@ public class VenueService
 
         var resp = await _http.GetAsync(_baseUrl + "/venues");
         var json = await resp.Content.ReadAsStringAsync();
-        try
+        if (!resp.IsSuccessStatusCode)
         {
-            if (!resp.IsSuccessStatusCode)
-            {
-                WTP.Log?.Warning($"FetchVenuesAsync: GET returned {(int)resp.StatusCode} {resp.ReasonPhrase}. Body: {json}");
-                resp.EnsureSuccessStatusCode();
-            }
-        }
-        catch (Exception ex)
-        {
-            WTP.Log?.Error(ex, "FetchVenuesAsync: HTTP error");
-            throw;
+            WTP.Log?.Warning($"FetchVenuesAsync: GET {(int)resp.StatusCode} {resp.ReasonPhrase}");
+            resp.EnsureSuccessStatusCode();
         }
 
         WTP.Log?.Information($"FetchVenuesAsync: received {Math.Min(2000, json.Length)} chars of JSON");
@@ -58,9 +47,9 @@ public class VenueService
         return filtered;
     }
 
-    public async Task<bool> SubmitVenueAsync(Venue v)
+    public async Task<(bool ok, int statusCode, string body)> SubmitVenueAsync(Venue v)
     {
-        if (string.IsNullOrEmpty(_baseUrl)) return false;
+        if (string.IsNullOrEmpty(_baseUrl)) return (false, 0, "Base URL not configured");
 
         if (v.Id == Guid.Empty) v.Id = Guid.NewGuid();
         v.LastUpdatedUtc = DateTime.UtcNow;
@@ -73,13 +62,77 @@ public class VenueService
         var resp = await _http.PostAsync(_baseUrl + "/venues", content);
         var respBody = await resp.Content.ReadAsStringAsync();
         if (!resp.IsSuccessStatusCode)
-        {
-            WTP.Log?.Warning($"SubmitVenueAsync: POST returned {(int)resp.StatusCode} {resp.ReasonPhrase}. Body: {respBody}");
-        }
+            WTP.Log?.Warning($"SubmitVenueAsync: POST {(int)resp.StatusCode} {resp.ReasonPhrase}");
         else
+            WTP.Log?.Information($"SubmitVenueAsync: POST succeeded.");
+        return (resp.IsSuccessStatusCode, (int)resp.StatusCode, respBody ?? string.Empty);
+    }
+
+    // Request a short-lived token from the worker for the given character identity.
+    public async Task<(bool ok, string token, int statusCode, string body)> RequestTokenAsync(string characterId, string characterName, string world)
+    {
+        if (string.IsNullOrEmpty(_baseUrl)) return (false, string.Empty, 0, "Base URL not configured");
+        var payload = new Dictionary<string, string>
         {
-            WTP.Log?.Information($"SubmitVenueAsync: POST succeeded. Response: {respBody}");
+            ["characterId"] = characterId ?? string.Empty,
+            ["characterName"] = characterName ?? string.Empty,
+            ["world"] = world ?? string.Empty,
+        };
+        var opts = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+        var json = JsonSerializer.Serialize(payload, opts);
+        var content = new StringContent(json, Encoding.UTF8, "application/json");
+        var resp = await _http.PostAsync(_baseUrl + "/auth", content);
+        var respBody = await resp.Content.ReadAsStringAsync();
+        if (!resp.IsSuccessStatusCode)
+        {
+            WTP.Log?.Warning($"RequestTokenAsync: POST /auth {(int)resp.StatusCode} {resp.ReasonPhrase}");
+            return (false, string.Empty, (int)resp.StatusCode, respBody ?? string.Empty);
         }
-        return resp.IsSuccessStatusCode;
+        try
+        {
+            using var doc = JsonDocument.Parse(respBody ?? string.Empty);
+            if (doc.RootElement.TryGetProperty("token", out var tokEl))
+            {
+                var token = tokEl.GetString() ?? string.Empty;
+                return (true, token, (int)resp.StatusCode, respBody ?? string.Empty);
+            }
+        }
+        catch { }
+        return (false, string.Empty, (int)resp.StatusCode, respBody ?? string.Empty);
+    }
+
+    // Submit a venue with an issued token (token must be obtained from /auth)
+    public async Task<(bool ok, int statusCode, string body)> SubmitVenueAsync(Venue v, string token)
+    {
+        if (string.IsNullOrEmpty(_baseUrl)) return (false, 0, "Base URL not configured");
+        if (string.IsNullOrEmpty(token)) return (false, 0, "Missing token");
+
+        if (v.Id == Guid.Empty) v.Id = Guid.NewGuid();
+        v.LastUpdatedUtc = DateTime.UtcNow;
+        if (v.LengthMinutes > 0) v.ExpiresAtUtc = v.LastUpdatedUtc.AddMinutes(v.LengthMinutes);
+        else v.ExpiresAtUtc = v.LastUpdatedUtc.AddDays(1);
+
+        var opts = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+        // Serialize venue to dictionary so we can inject the token field
+        var venueJson = JsonSerializer.Serialize(v, opts);
+        Dictionary<string, object?> dict;
+        try
+        {
+            dict = JsonSerializer.Deserialize<Dictionary<string, object?>>(venueJson) ?? new Dictionary<string, object?>();
+        }
+        catch
+        {
+            dict = new Dictionary<string, object?>();
+        }
+        dict["token"] = token;
+        var body = JsonSerializer.Serialize(dict, opts);
+        var content = new StringContent(body, Encoding.UTF8, "application/json");
+        var resp = await _http.PostAsync(_baseUrl + "/venues", content);
+        var respBody = await resp.Content.ReadAsStringAsync();
+        if (!resp.IsSuccessStatusCode)
+            WTP.Log?.Warning($"SubmitVenueAsync(token): POST {(int)resp.StatusCode} {resp.ReasonPhrase}");
+        else
+            WTP.Log?.Information($"SubmitVenueAsync(token): POST succeeded.");
+        return (resp.IsSuccessStatusCode, (int)resp.StatusCode, respBody ?? string.Empty);
     }
 }

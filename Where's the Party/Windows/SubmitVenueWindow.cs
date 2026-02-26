@@ -26,8 +26,8 @@ public class SubmitVenueWindow : Window, IDisposable
     private int lengthMinutes = 60;
     private string statusMessage = string.Empty;
     private bool submitting = false;
+    private string confirmWorld = string.Empty;
 
-    // Wi-Fi
     private bool wifiLightless = false;
     private string lightlessSyncshellId = string.Empty;
     private string lightlessSyncshellPassword = string.Empty;
@@ -51,18 +51,17 @@ public class SubmitVenueWindow : Window, IDisposable
     private int selectedPlot = 35;
 
     // Address editing
-    private bool editingAddress = false; // toggles the address editor
+    private bool editingAddress = false;
     private bool usePlot = true;
     private bool useApartment = false;
-    // Only one apartment or subdivision may be selected per listing
-    private int selectedApartment = -1; // 1-based index, -1 = none
-    private int selectedSubdivision = -1; // 1-based index, -1 = none
+    private int selectedApartment = -1;
+    private int selectedSubdivision = -1;
 
-    // Wi-Fi UI
+    // UI flags
     private bool showWifiOptions = false;
 
     // Weekly schedule
-    private bool[] openDays = new bool[7]; // 0=Sun .. 6=Sat
+    private bool[] openDays = new bool[7];
     private int openHour = 20;
     private int openMinute = 0;
     private int closeHour = 23;
@@ -104,6 +103,104 @@ public class SubmitVenueWindow : Window, IDisposable
         world = "Behemoth"; // default world name until populated
     }
 
+    // Try to obtain the player's current world (HomeWorld/World) in a compatibility-safe way.
+    private static string? GetLocalPlayerWorldSafe()
+    {
+        // Helper: try to extract a human-readable world name from a reflected object
+        static string? ResolveWorldObject(object? o)
+        {
+            if (o == null) return null;
+            try
+            {
+                // If it's already a string and not a Lumina rowref, return it
+                if (o is string s)
+                {
+                    if (string.IsNullOrWhiteSpace(s)) return null;
+                    if (s.IndexOf("Lumina.Excel.RowRef", StringComparison.OrdinalIgnoreCase) >= 0) return null;
+                    return s;
+                }
+
+                // If object has a Value property (Lumina.RowRef style), try to get its Name
+                var t = o.GetType();
+                var valueProp = t.GetProperty("Value") ?? t.GetProperty("Row") ?? t.GetProperty("_value");
+                var candidate = valueProp?.GetValue(o);
+                if (candidate != null)
+                {
+                    var nameProp = candidate.GetType().GetProperty("Name") ?? candidate.GetType().GetProperty("EnglishName") ?? candidate.GetType().GetProperty("Text");
+                    var nameVal = nameProp?.GetValue(candidate)?.ToString();
+                    if (!string.IsNullOrEmpty(nameVal)) return nameVal;
+                    var candToStr = candidate.ToString();
+                    if (!string.IsNullOrEmpty(candToStr) && candToStr.IndexOf("Lumina.Excel.RowRef", StringComparison.OrdinalIgnoreCase) < 0) return candToStr;
+                }
+
+                // Try direct Name property on the object
+                var directName = t.GetProperty("Name") ?? t.GetProperty("WorldName") ?? t.GetProperty("HomeWorld");
+                var dn = directName?.GetValue(o)?.ToString();
+                if (!string.IsNullOrEmpty(dn) && dn.IndexOf("Lumina.Excel.RowRef", StringComparison.OrdinalIgnoreCase) < 0) return dn;
+
+                // Fallback to ToString if it's not a Lumina rowref string
+                var s2 = o.ToString();
+                if (!string.IsNullOrEmpty(s2) && s2.IndexOf("Lumina.Excel.RowRef", StringComparison.OrdinalIgnoreCase) < 0) return s2;
+            }
+            catch { }
+            return null;
+        }
+
+        try
+        {
+            var ps = WTP.PlayerState;
+            if (ps != null)
+            {
+                try
+                {
+                    var hwProp = ps.GetType().GetProperty("HomeWorld") ?? ps.GetType().GetProperty("HomeWorldId") ?? ps.GetType().GetProperty("World");
+                    var hwObj = hwProp?.GetValue(ps);
+                    var fromPs = ResolveWorldObject(hwObj);
+                    if (!string.IsNullOrEmpty(fromPs)) return fromPs;
+                }
+                catch { }
+            }
+
+            // Try ObjectTable.LocalPlayer via PluginInterface
+            try
+            {
+                var pi = WTP.PluginInterface;
+                if (pi != null)
+                {
+                    var otProp = pi.GetType().GetProperty("ObjectTable");
+                    var ot = otProp?.GetValue(pi);
+                    var lpProp = ot?.GetType().GetProperty("LocalPlayer");
+                    var lp = lpProp?.GetValue(ot);
+                    if (lp != null)
+                    {
+                        var worldProp = lp.GetType().GetProperty("HomeWorld") ?? lp.GetType().GetProperty("HomeWorldId") ?? lp.GetType().GetProperty("World");
+                        var wObj = worldProp?.GetValue(lp);
+                        var fromLp = ResolveWorldObject(wObj);
+                        if (!string.IsNullOrEmpty(fromLp)) return fromLp;
+                    }
+                }
+            }
+            catch { }
+        }
+        catch { }
+
+        return null;
+    }
+
+    // Compare an existing Owner string against the current character identity.
+    // Returns true if the stored owner matches the character id or display name.
+    private static bool IsOwnerMatch(string existingOwner, string? currentCharId, string? currentName)
+    {
+        if (string.IsNullOrEmpty(existingOwner)) return false;
+        // Exact match to character id
+        if (!string.IsNullOrEmpty(currentCharId) && string.Equals(existingOwner, currentCharId, StringComparison.OrdinalIgnoreCase)) return true;
+        // Match to display name
+        if (!string.IsNullOrEmpty(currentName) && string.Equals(existingOwner, currentName, StringComparison.OrdinalIgnoreCase)) return true;
+        // Some older entries may have been stored as name@world or other variants; try contains checks
+        if (!string.IsNullOrEmpty(currentName) && existingOwner.IndexOf(currentName, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+        return false;
+    }
+
     private static string FormatHourLabel(int h)
     {
         var hour12 = h % 12;
@@ -131,7 +228,8 @@ public class SubmitVenueWindow : Window, IDisposable
         description = v.Description ?? string.Empty;
         carrdUrl = v.CarrdUrl ?? string.Empty;
         tags = v.Tags != null ? string.Join(',', v.Tags) : string.Empty;
-        address = v.Address ?? string.Empty;
+        // Sanitize stored address to remove any Lumina rowref artifacts the server may have stored
+        address = SanitizeStoredAddress(v.Address ?? string.Empty);
         lengthMinutes = v.LengthMinutes > 0 ? v.LengthMinutes : lengthMinutes;
 
         // Data center / world selection
@@ -142,16 +240,19 @@ public class SubmitVenueWindow : Window, IDisposable
         }
         // set world selection if possible
         var dcKey = dataCenters.ElementAtOrDefault(selectedDcIndex) ?? string.Empty;
-        if (!string.IsNullOrEmpty(v.World) && worldsByDc != null && worldsByDc.ContainsKey(dcKey))
+        // Sanitize possible Lumina rowref tokens in stored world string before matching
+        var rawWorld = v.World ?? string.Empty;
+        var sanitizedWorld = Regex.Replace(rawWorld, @"Lumina\.Excel\.RowRef`?\d*\[[^\]]*\]", string.Empty, RegexOptions.IgnoreCase).Trim();
+        if (!string.IsNullOrEmpty(sanitizedWorld) && worldsByDc != null && worldsByDc.ContainsKey(dcKey))
         {
             var worlds = worldsByDc[dcKey];
-            var widx = worlds.FindIndex(x => string.Equals(x, v.World, StringComparison.OrdinalIgnoreCase));
-            if (widx >= 0) { selectedWorldIndex = widx; world = worlds.ElementAtOrDefault(selectedWorldIndex) ?? v.World; }
-            else world = v.World ?? world;
+            var widx = worlds.FindIndex(x => string.Equals(x, sanitizedWorld, StringComparison.OrdinalIgnoreCase));
+            if (widx >= 0) { selectedWorldIndex = widx; world = worlds.ElementAtOrDefault(selectedWorldIndex) ?? sanitizedWorld; }
+            else world = sanitizedWorld ?? world;
         }
         else
         {
-            world = v.World ?? world;
+            world = sanitizedWorld ?? world;
         }
 
         // Try to parse apartment / subdivision / plot selection from the stored address so
@@ -260,6 +361,10 @@ public class SubmitVenueWindow : Window, IDisposable
         snowCloakSyncshellId = v.SnowCloakSyncshellId ?? string.Empty;
         snowCloakSyncshellPassword = v.SnowCloakSyncshellPassword ?? string.Empty;
 
+        // Do NOT prefill confirmWorld. Leave empty so the user must manually
+        // confirm the world (anti-bot/anti-spam protection).
+        confirmWorld = string.Empty;
+
         // Restore schedule fields if present
         if (v.OpenDaysMask != 0)
         {
@@ -289,6 +394,9 @@ public class SubmitVenueWindow : Window, IDisposable
         selectedSubdivision = -1;
         for (var i = 0; i < openDays.Length; ++i) openDays[i] = false;
         openHour = 20; openMinute = 0; closeHour = 23; closeMinute = 0;
+        // Do NOT prefill confirmWorld for new listings. Require manual confirmation
+        // to avoid making automated submissions easier.
+        confirmWorld = string.Empty;
     }
 
     // Fetch current user's listing (if any), populate the form, and open the submit window.
@@ -296,9 +404,10 @@ public class SubmitVenueWindow : Window, IDisposable
     {
         try
         {
-            var currentOwner = WTP.ClientState?.LocalPlayer?.Name?.ToString() ?? string.Empty;
+            var currentCharId = GetLocalCharacterId();
+            var currentName = GetLocalPlayerNameSafe();
             var list = await venueService.FetchVenuesAsync();
-            var usersListing = list.FirstOrDefault(x => !string.IsNullOrEmpty(x.Owner) && string.Equals(x.Owner, currentOwner, StringComparison.OrdinalIgnoreCase));
+            var usersListing = list.FirstOrDefault(x => !string.IsNullOrEmpty(x.Owner) && IsOwnerMatch(x.Owner, currentCharId, currentName));
             if (usersListing != null)
             {
                 PopulateFromVenue(usersListing);
@@ -379,11 +488,26 @@ public class SubmitVenueWindow : Window, IDisposable
 
         // Name
         ImGui.TableNextRow(); ImGui.TableSetColumnIndex(0); ImGui.TextUnformatted("Venue Name");
-        ImGui.TableSetColumnIndex(1); ImGui.InputText("##VenueName", ref name, 50);
+        ImGui.TableSetColumnIndex(1);
+        // Determine a consistent input width for single-line controls so they match the multiline box
+        var defaultAvail = ImGui.GetContentRegionAvail();
+        var defaultPad = ImGui.GetStyle().FramePadding.X * 2;
+        var fieldWidth = Math.Max(32f, defaultAvail.X - defaultPad);
+        ImGui.SetNextItemWidth(fieldWidth);
+        ImGui.InputText("##VenueName", ref name, 50);
 
         // Description (allow longer text)
         ImGui.TableNextRow(); ImGui.TableSetColumnIndex(0); ImGui.TextUnformatted("Description");
-        ImGui.TableSetColumnIndex(1); ImGui.InputTextMultiline("##VenueDescription", ref description, 1500, new Vector2(-1, 80));
+        ImGui.TableSetColumnIndex(1);
+        // Size the multiline control to match the table column width so it aligns with other controls.
+        // Some ImGui bindings don't expose the table column width API; use the available content region instead.
+        var style = ImGui.GetStyle();
+        var avail = ImGui.GetContentRegionAvail();
+        // account for frame padding
+        var inputWidth = Math.Max(32f, avail.X - (style.FramePadding.X * 2));
+        ImGui.PushItemWidth(inputWidth);
+        ImGui.InputTextMultiline("##VenueDescription", ref description, 1500, new Vector2(0, 80));
+        ImGui.PopItemWidth();
 
         // Address (composed)
         ImGui.TableNextRow(); ImGui.TableSetColumnIndex(0); ImGui.TextUnformatted("Address");
@@ -539,7 +663,9 @@ public class SubmitVenueWindow : Window, IDisposable
 
         // Carrd URL
         ImGui.TableNextRow(); ImGui.TableSetColumnIndex(0); ImGui.TextUnformatted("Carrd URL");
-        ImGui.TableSetColumnIndex(1); ImGui.InputText("##CarrdUrl", ref carrdUrl, 256);
+        ImGui.TableSetColumnIndex(1);
+        ImGui.SetNextItemWidth(fieldWidth);
+        ImGui.InputText("##CarrdUrl", ref carrdUrl, 256);
 
         // Schedule (separate from address editing)
         ImGui.TableNextRow(); ImGui.TableSetColumnIndex(0); ImGui.TextUnformatted("Open Days");
@@ -629,7 +755,9 @@ public class SubmitVenueWindow : Window, IDisposable
 
         // Tags
         ImGui.TableNextRow(); ImGui.TableSetColumnIndex(0); ImGui.TextUnformatted("Tags");
-        ImGui.TableSetColumnIndex(1); ImGui.InputText("##Tags", ref tags, 64);
+        ImGui.TableSetColumnIndex(1);
+        ImGui.SetNextItemWidth(fieldWidth);
+        ImGui.InputText("##Tags", ref tags, 64);
 
         // Length (minutes) - limit to 8 hours (480 minutes)
         ImGui.TableNextRow(); ImGui.TableSetColumnIndex(0); ImGui.TextUnformatted("Length (minutes)");
@@ -672,15 +800,27 @@ public class SubmitVenueWindow : Window, IDisposable
             ImGui.InputText("##SnowCloakPW", ref snowCloakSyncshellPassword, 64);
         }
 
-        // Submit
+        // Show logged in name and require world confirmation to reduce spoofing/bot submissions
+        ImGui.TableNextRow(); ImGui.TableSetColumnIndex(0); ImGui.TextUnformatted("Logged in as:");
+        ImGui.TableSetColumnIndex(1); ImGui.TextUnformatted(GetLocalPlayerNameSafe());
+
+        ImGui.TableNextRow(); ImGui.TableSetColumnIndex(0); ImGui.TextUnformatted("Confirm world");
+        ImGui.TableSetColumnIndex(1);
+        ImGui.SetNextItemWidth(fieldWidth);
+        ImGui.InputText("##ConfirmWorld", ref confirmWorld, 64);
+
+        // Submit (button disabled until world is manually confirmed)
         ImGui.TableNextRow(); ImGui.TableSetColumnIndex(0); ImGui.TextUnformatted(string.Empty); ImGui.TableSetColumnIndex(1);
-        if (!submitting)
+        // The confirm field is intended to confirm the submitter's home/world used
+        // for ownership token issuance. Use the player's world when available.
+        var effectiveTokenWorld = GetLocalPlayerWorldSafe() ?? (world ?? string.Empty);
+        var worldConfirmed = !string.IsNullOrWhiteSpace(confirmWorld) && string.Equals(confirmWorld.Trim(), effectiveTokenWorld?.Trim() ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+        ImGui.BeginDisabled(!worldConfirmed || submitting);
+        if (ImGui.Button("Submit")) { submitting = true; statusMessage = "Submitting..."; _ = SubmitAsync(); }
+        ImGui.EndDisabled();
+        if (submitting)
         {
-            if (ImGui.Button("Submit")) { submitting = true; statusMessage = "Submitting..."; _ = SubmitAsync(); }
-        }
-        else
-        {
-            // simple visual disabled state while submitting
+            // simple visual state while submitting
             ImGui.TextUnformatted("Submitting...");
         }
 
@@ -749,6 +889,32 @@ public class SubmitVenueWindow : Window, IDisposable
         };
     }
 
+    // Remove Lumina rowref tokens and normalize separators so stored addresses
+    // containing rowrefs (e.g. "Lumina.Excel.RowRef`1[...]") don't render raw in the UI.
+    private static string SanitizeStoredAddress(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return string.Empty;
+        try
+        {
+            // Remove Lumina rowref tokens like: Lumina.Excel.RowRef`1[...]
+            var s = Regex.Replace(raw, @"Lumina\.Excel\.RowRef`?\d*\[[^\]]*\]", string.Empty, RegexOptions.IgnoreCase);
+            // Normalize separators and whitespace
+            s = Regex.Replace(s, @"\s*>\s*", " > ");
+            // Collapse repeated separators
+            s = Regex.Replace(s, @">(\s*>)+", "> ");
+            // Trim leftover separators/spaces
+            s = s.Trim();
+            s = s.Trim('>', ' ', '\t');
+            // Final normalize
+            s = Regex.Replace(s, @"\s*>\s*", " > ");
+            return s;
+        }
+        catch
+        {
+            return raw;
+        }
+    }
+
     private string GetSubmittedAddress()
     {
         if (editingAddress && !string.IsNullOrWhiteSpace(address)) return address; // custom override
@@ -759,6 +925,149 @@ public class SubmitVenueWindow : Window, IDisposable
         }
 
         return address;
+    }
+
+    // Obtain a displayable player name in a compatibility-safe way.
+    // Prefer IPlayerState when available, then try PluginInterface.ObjectTable.LocalPlayer via reflection.
+    private static string GetLocalPlayerNameSafe()
+    {
+        try
+        {
+            var ps = WTP.PlayerState;
+            if (ps != null)
+            {
+                var t = ps.GetType();
+                var prop = t.GetProperty("Name") ?? t.GetProperty("DisplayName") ?? t.GetProperty("CharacterName");
+                if (prop != null)
+                {
+                    var val = prop.GetValue(ps);
+                    if (val != null) return val.ToString() ?? string.Empty;
+                }
+            }
+
+            // Try ObjectTable.LocalPlayer via PluginInterface (some Dalamud versions expose this)
+            try
+            {
+                var pi = WTP.PluginInterface;
+                if (pi != null)
+                {
+                    var otProp = pi.GetType().GetProperty("ObjectTable");
+                    var ot = otProp?.GetValue(pi);
+                    if (ot != null)
+                    {
+                        var lpProp = ot.GetType().GetProperty("LocalPlayer");
+                        var lp = lpProp?.GetValue(ot);
+                        if (lp != null)
+                        {
+                            var lpType = lp.GetType();
+                            var nameProp = lpType.GetProperty("Name") ?? lpType.GetProperty("DisplayName");
+                            var nm = nameProp?.GetValue(lp)?.ToString();
+                            if (!string.IsNullOrEmpty(nm)) return nm;
+                            var s = lp.ToString();
+                            if (!string.IsNullOrEmpty(s)) return s;
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+        catch { }
+        return string.Empty;
+    }
+
+    // Return a stable character identifier. Preferred: PlayerState.ContentId when available.
+    // Fallbacks: reflect over PluginInterface.ObjectTable.LocalPlayer for ContentId/ObjectId/Id,
+    // finally fall back to "name@world" using PlayerState values.
+    private static string? GetLocalCharacterId()
+    {
+        try
+        {
+            // Prefer ContentId from IPlayerState if present
+            var ps = WTP.PlayerState;
+            if (ps != null)
+            {
+                try
+                {
+                    var cidProp = ps.GetType().GetProperty("ContentId");
+                    if (cidProp != null)
+                    {
+                        var cidVal = cidProp.GetValue(ps);
+                        if (cidVal is long l && l != 0) return l.ToString();
+                        if (cidVal is ulong ul && ul != 0) return ul.ToString();
+                        if (cidVal != null)
+                        {
+                            var s = cidVal.ToString();
+                            if (!string.IsNullOrEmpty(s) && s != "0") return s;
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            // Try ObjectTable.LocalPlayer via PluginInterface (preferred to obsolete IClientState.LocalPlayer)
+            try
+            {
+                var pi = WTP.PluginInterface;
+                var otProp = pi?.GetType().GetProperty("ObjectTable");
+                var ot = otProp?.GetValue(pi);
+                var lpProp = ot?.GetType().GetProperty("LocalPlayer");
+                var lp = lpProp?.GetValue(ot);
+                if (lp != null)
+                {
+                    var props = lp.GetType().GetProperties();
+                    foreach (var prop in props)
+                    {
+                        if (string.Equals(prop.Name, "ContentId", StringComparison.OrdinalIgnoreCase)
+                            || string.Equals(prop.Name, "ObjectId", StringComparison.OrdinalIgnoreCase)
+                            || string.Equals(prop.Name, "Id", StringComparison.OrdinalIgnoreCase))
+                        {
+                            try
+                            {
+                                var val = prop.GetValue(lp);
+                                if (val != null)
+                                {
+                                    var s = val.ToString();
+                                    if (!string.IsNullOrEmpty(s) && s != "0") return s;
+                                }
+                            }
+                            catch { }
+                        }
+                    }
+
+                    // Final fallback using LocalPlayer name + world properties
+                    try
+                    {
+                        var nameProp = lp.GetType().GetProperty("Name") ?? lp.GetType().GetProperty("DisplayName");
+                        var worldProp = lp.GetType().GetProperty("HomeWorld") ?? lp.GetType().GetProperty("HomeWorldId") ?? lp.GetType().GetProperty("World");
+                        var nameVal = nameProp?.GetValue(lp)?.ToString();
+                        var worldVal = worldProp?.GetValue(lp)?.ToString();
+                        if (!string.IsNullOrEmpty(nameVal))
+                        {
+                            if (!string.IsNullOrEmpty(worldVal)) return $"{nameVal}@{worldVal}";
+                            return nameVal;
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+
+            // Last resort: try PlayerState name and HomeWorldId
+            try
+            {
+                if (ps != null)
+                {
+                    var nameProp = ps.GetType().GetProperty("Name") ?? ps.GetType().GetProperty("DisplayName");
+                    var hwProp = ps.GetType().GetProperty("HomeWorldId");
+                    var n = nameProp?.GetValue(ps)?.ToString();
+                    var hw = hwProp?.GetValue(ps)?.ToString();
+                    if (!string.IsNullOrEmpty(n)) return !string.IsNullOrEmpty(hw) ? $"{n}@{hw}" : n;
+                }
+            }
+            catch { }
+        }
+        catch { }
+        return null;
     }
 
     private async Task SubmitAsync()
@@ -800,11 +1109,11 @@ public class SubmitVenueWindow : Window, IDisposable
             v.SnowCloakSyncshellId = snowCloakSyncshellId ?? string.Empty;
             v.SnowCloakSyncshellPassword = snowCloakSyncshellPassword ?? string.Empty;
 
-            // Determine current player name to mark ownership
-            // LocalPlayer.Name is a SeString; convert to string. IClientState.LocalPlayer is marked obsolete but still available.
-            string currentOwner = WTP.ClientState?.LocalPlayer?.Name?.ToString() ?? string.Empty;
-            // No reliable Name on IPlayerState across Dalamud versions; keep client-local fallback only
-            v.Owner = currentOwner;
+            // Determine current player identity for ownership: prefer stable character id, fall back to name.
+            var currentCharId = GetLocalCharacterId();
+            var currentName = GetLocalPlayerNameSafe();
+            var ownerId = currentCharId ?? currentName ?? string.Empty;
+            v.Owner = ownerId;
 
             // Check for duplicates and existing ownership
             try
@@ -815,20 +1124,21 @@ public class SubmitVenueWindow : Window, IDisposable
                 if (sameName != null)
                 {
                     // If the same owner, treat as update; otherwise reject
-                    if (!string.IsNullOrEmpty(sameName.Owner) && string.Equals(sameName.Owner, currentOwner, StringComparison.OrdinalIgnoreCase))
+                    if (!string.IsNullOrEmpty(sameName.Owner) && IsOwnerMatch(sameName.Owner, currentCharId, currentName))
                     {
                         v.Id = sameName.Id; // update owner's existing listing with same name
                     }
                     else
                     {
-                        statusMessage = "A venue with that name already exists.";
+                        // Do not leak server-side conflict details; show a generic message
+                        statusMessage = "That venue already exists.";
                         submitting = false;
                         return;
                     }
                 }
 
                 // Ensure one entry per user: if the user already has a different listing, update it instead of creating a new one
-                var usersListing = existing.FirstOrDefault(x => !string.IsNullOrEmpty(x.Owner) && string.Equals(x.Owner, currentOwner, StringComparison.OrdinalIgnoreCase));
+                var usersListing = existing.FirstOrDefault(x => !string.IsNullOrEmpty(x.Owner) && IsOwnerMatch(x.Owner, currentCharId, currentName));
                 if (usersListing != null && usersListing.Id != v.Id)
                 {
                     // Update the user's existing listing (overwrite)
@@ -889,17 +1199,97 @@ public class SubmitVenueWindow : Window, IDisposable
             }
             catch { }
 
-            var ok = await venueService.SubmitVenueAsync(v);
-            if (ok)
+            // Request a short-lived token for this character, then submit using the token.
+            bool ok = false;
+            int statusCode = 0;
+            string respBody = string.Empty;
+            try
             {
-                statusMessage = "Submitted successfully.";
-                // Refresh the shared venue list so the new entry appears immediately.
-                try { await plugin.RequestVenueRefreshAsync(); } catch { }
+                object? GetMember(object o, string name)
+                {
+                    var tt = o.GetType();
+                    var prop = tt.GetProperty(name);
+                    if (prop != null) return prop.GetValue(o);
+                    var field = tt.GetField(name);
+                    if (field != null) return field.GetValue(o);
+                    return null;
+                }
+
+                var charId = GetLocalCharacterId() ?? string.Empty;
+                var charName = GetLocalPlayerNameSafe() ?? string.Empty;
+
+                // Determine the world to use for token issuance: prefer the player's
+                // home/world (so confirmWorld is confirming the player's world).
+                var tokenWorld = GetLocalPlayerWorldSafe() ?? v.World ?? string.Empty;
+
+                // Require the user to confirm the world that will be used for the submission
+                if (string.IsNullOrWhiteSpace(confirmWorld) || !string.Equals(confirmWorld.Trim(), tokenWorld?.Trim() ?? string.Empty, StringComparison.OrdinalIgnoreCase))
+                {
+                    statusMessage = "Please confirm the selected world before submitting.";
+                    submitting = false;
+                    return;
+                }
+
+                var tokenResultObj = await venueService.RequestTokenAsync(charId, charName, tokenWorld);
+                var r_ok = GetMember(tokenResultObj, "ok") ?? GetMember(tokenResultObj, "Item1");
+                var r_token = GetMember(tokenResultObj, "token") ?? GetMember(tokenResultObj, "Item2");
+                var r_status = GetMember(tokenResultObj, "statusCode") ?? GetMember(tokenResultObj, "Item3");
+                var r_body = GetMember(tokenResultObj, "body") ?? GetMember(tokenResultObj, "Item4");
+
+                var tokenOk = false;
+                var tokenStr = string.Empty;
+                var tokenStatus = 0;
+                var tokenBody = string.Empty;
+                if (r_ok != null) tokenOk = Convert.ToBoolean(r_ok);
+                if (r_token != null) tokenStr = r_token.ToString() ?? string.Empty;
+                if (r_status != null) { try { tokenStatus = Convert.ToInt32(r_status); } catch { tokenStatus = 0; } }
+                if (r_body != null) tokenBody = r_body.ToString() ?? string.Empty;
+
+                if (!tokenOk || string.IsNullOrEmpty(tokenStr))
+                {
+                    var body = tokenBody.Replace("\r", "").Replace("\n", " ").Trim();
+                    if (body.Length > 300) body = body.Substring(0, 300) + "...";
+                    statusMessage = $"Token request failed ({tokenStatus}): {body}";
+                    submitting = false;
+                    return;
+                }
+
+                // Submit using token
+                var submitResultObj = await venueService.SubmitVenueAsync(v, tokenStr);
+
+                var s1 = GetMember(submitResultObj, "ok") ?? GetMember(submitResultObj, "Item1");
+                var s2 = GetMember(submitResultObj, "statusCode") ?? GetMember(submitResultObj, "Item2");
+                var s3 = GetMember(submitResultObj, "body") ?? GetMember(submitResultObj, "Item3");
+
+                if (s1 != null) ok = Convert.ToBoolean(s1);
+                if (s2 != null) { try { statusCode = Convert.ToInt32(s2); } catch { statusCode = 0; } }
+                if (s3 != null) respBody = s3.ToString() ?? string.Empty;
             }
-            else
+            catch
             {
-                statusMessage = "Submission failed.";
+                ok = false; statusCode = -1; respBody = string.Empty;
             }
+
+                if (ok)
+                {
+                    statusMessage = "Submitted successfully.";
+                    try { await plugin.RequestVenueRefreshAsync(); } catch { }
+                }
+                else
+                {
+                    // For known conflict status avoid leaking server details
+                    if (statusCode == 409)
+                    {
+                        statusMessage = "That venue already exists.";
+                    }
+                    else
+                    {
+                        var body = respBody ?? string.Empty;
+                        body = body.Replace("\r", "").Replace("\n", " ").Trim();
+                        if (body.Length > 300) body = body.Substring(0, 300) + "...";
+                        statusMessage = $"Submission failed ({statusCode}): {body}";
+                    }
+                }
         }
         catch (Exception ex)
         {

@@ -15,7 +15,7 @@ using WTP.Services;
 
 namespace WTP.Windows;
 
-public class VenueListWindow : Window, IDisposable 
+public class VenueListWindow : Window, IDisposable
 {
     private readonly string wtpImagePath;
     private readonly WTP plugin;
@@ -25,40 +25,21 @@ public class VenueListWindow : Window, IDisposable
     private string status = string.Empty;
     private bool loading = false;
     private bool fetchedOnce = false;
-    // Data center filters (key = DC name, value = enabled)
     private Dictionary<string, bool> dcFilters = new();
-    // Tag filters (key = tag text, value = enabled)
     private Dictionary<string, bool> tagFilters = new();
-    // Preserve an initial known DC list so the filters can fall back when server returns none
     private readonly List<string> initialDcList = new();
-    // Show filters as a resizable window instead of a popup when true
     private bool showFiltersWindow = false;
-    // no image texture support; use simple text button for refresh
     private bool autoRefresh = true;
     private DateTime lastAutoRefresh = DateTime.UtcNow;
     private readonly TimeSpan autoRefreshInterval = TimeSpan.FromSeconds(30);
-    // We give this window a hidden ID using ##.
-    // The user will see "My Amazing Window" as window title,
-    // but for ImGui the ID is "My Amazing Window##With a hidden ID"
+
     public VenueListWindow(WTP plugin, string wtpImagePath, VenueService venueService)
         : base("Where's the Party##VenueListWindow", ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
     {
-        SizeConstraints = new WindowSizeConstraints
-        {
-            MinimumSize = new Vector2(375, 330),
-            MaximumSize = new Vector2(float.MaxValue, float.MaxValue)
-        };
-
-        this.wtpImagePath = wtpImagePath;
-        this.plugin = plugin;
-        this.venueService = venueService;
-
-        // Initialize DC filters from a known set so Filters popup has entries before first refresh
+        SizeConstraints = new WindowSizeConstraints { MinimumSize = new Vector2(375, 330), MaximumSize = new Vector2(float.MaxValue, float.MaxValue) };
+        this.wtpImagePath = wtpImagePath; this.plugin = plugin; this.venueService = venueService;
         var knownDcs = new[] { "Aether", "Crystal", "Dynamis", "Primal", "Chaos", "Light", "Materia", "Elemental", "Gaia", "Mana", "Meteor" };
-        this.initialDcList.AddRange(knownDcs);
-        foreach (var dc in knownDcs) dcFilters[dc] = true;
-
-        // No image loading; we always use the text "Refresh" button
+        this.initialDcList.AddRange(knownDcs); foreach (var dc in knownDcs) dcFilters[dc] = true;
     }
 
     public void Dispose() { }
@@ -76,11 +57,13 @@ public class VenueListWindow : Window, IDisposable
                 lastAutoRefresh = DateTime.UtcNow;
         }
 
-        // Reload button
-        if (ImGui.Button("Refresh"))
+        // Use Unicode icons so no FontAwesome setup is required
+        var icon = loading ? "" : ""; // hourglass when loading, clockwise arrow otherwise
+        if (UiHelpers.IconButton("Refresh", icon))
         {
-            _ = RefreshAsync();
+            if (!loading) _ = RefreshAsync();
         }
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Refresh");
 
         ImGui.SameLine();
         if (ImGui.Button("Submit Venue"))
@@ -236,9 +219,8 @@ public class VenueListWindow : Window, IDisposable
             // Render each venue as a card-style entry instead of a table row
             foreach (var v in filtered)
             {
-                // Use a taller fixed card height so cards don't expand to the full window and hide others
-                // This prevents a single card from taking the entire area while still avoiding clipping
-                ImGui.BeginChild($"VenueCard_{v.Id}", new Vector2(0, 220), true, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
+                // Use a fixed card height (slightly smaller) and add bottom padding so content doesn't clip
+                ImGui.BeginChild($"VenueCard_{v.Id}", new Vector2(0, 170), true, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
                 try
                 {
 
@@ -275,13 +257,13 @@ public class VenueListWindow : Window, IDisposable
                     ImGui.SameLine();
                     ImGui.SetCursorPosX(Math.Max(reserved, innerContentMax - 80));
                     ImGui.PushStyleColor(ImGuiCol.Button, new System.Numerics.Vector4(0.2f, 0.2f, 0.2f, 0.6f));
-                    if (ImGui.Button("Wi-Fi", new Vector2(60, 0)))
+                    if (ImGui.Button(" Wi-Fi", new Vector2(60, 0)))
                     {
                         ImGui.OpenPopup($"WifiPopup_{v.Id}");
                     }
                     ImGui.PopStyleColor();
 
-                    // Wi‑Fi popup showing syncshell credentials with copy buttons
+                    // Wi-Fi popup showing syncshell credentials with copy buttons
                     if (ImGui.BeginPopup($"WifiPopup_{v.Id}"))
                     {
                         ImGui.TextUnformatted("Syncshell credentials");
@@ -323,7 +305,7 @@ public class VenueListWindow : Window, IDisposable
                             ImGui.Separator();
                         }
 
-                        // If no Wi‑Fi options, show a friendly message
+                        // If no Wi-Fi options, show a friendly message
                         if (v.WifiOptions == WifiOption.None)
                         {
                             ImGui.TextUnformatted("No Wi-Fi / Sync options available for this listing.");
@@ -332,47 +314,8 @@ public class VenueListWindow : Window, IDisposable
                         ImGui.EndPopup();
                     }
 
-                    // Show schedule under the Carrd button (converted to viewer's local time)
-                    try
-                    {
-                        if ((v.OpenDaysMask != 0) || (v.OpensAtUtc != default && v.ClosesAtUtc != default))
-                        {
-                            // Build day list from mask if available
-                            string daysText = string.Empty;
-                            if (v.OpenDaysMask != 0)
-                            {
-                                var dayNames = new[] { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
-                                var parts = new List<string>();
-                                for (var di = 0; di < 7; ++di)
-                                {
-                                    if ((v.OpenDaysMask & (1 << di)) != 0) parts.Add(dayNames[di]);
-                                }
-                                daysText = parts.Count > 0 ? string.Join(',', parts) + " " : string.Empty;
-                            }
-
-                            // Show time range in viewer local time if UTC times are present, otherwise use stored local minutes as fallback
-                            string timeText = string.Empty;
-                            if (v.OpensAtUtc != default && v.ClosesAtUtc != default)
-                            {
-                                var openLocal = v.OpensAtUtc.ToLocalTime();
-                                var closeLocal = v.ClosesAtUtc.ToLocalTime();
-                                timeText = $"{openLocal:h:mm tt} - {closeLocal:h:mm tt}";
-                            }
-                            else
-                            {
-                                // fallback: use stored local minutes (submitter-local) and display in 12-hour format (no timezone conversion)
-                                var openMinutes = Math.Max(0, v.OpenTimeMinutesLocal % (24*60));
-                                var closeMinutes = Math.Max(0, v.CloseTimeMinutesLocal % (24*60));
-                                var openDt = DateTime.Today.AddMinutes(openMinutes);
-                                var closeDt = DateTime.Today.AddMinutes(closeMinutes);
-                                timeText = $"{openDt:h:mm tt} - {closeDt:h:mm tt}";
-                            }
-
-                            ImGui.Separator();
-                            ImGui.TextUnformatted($"Schedule: {daysText}{timeText}");
-                        }
-                    }
-                    catch { }
+                    // Render schedule under the Carrd button
+                    ScheduleRenderer.RenderSchedule(v);
 
                     ImGui.Spacing();
 
@@ -381,13 +324,13 @@ public class VenueListWindow : Window, IDisposable
                     ImGui.SetColumnWidth(0, ImGui.GetWindowContentRegionMax().X * 0.7f);
 
                     // Description box (left)
-                    ImGui.BeginChild($"desc_{v.Id}", new Vector2(0, 76), false);
+                    ImGui.BeginChild($"desc_{v.Id}", new Vector2(0, 60), false);
                     ImGui.TextWrapped(string.IsNullOrWhiteSpace(v.Description) ? "(No description)" : v.Description);
                     ImGui.EndChild();
 
                     ImGui.NextColumn();
                     // Tags box (right)
-                    ImGui.BeginChild($"tags_{v.Id}", new Vector2(0, 76), true);
+                    ImGui.BeginChild($"tags_{v.Id}", new Vector2(0, 60), true);
                     ImGui.TextUnformatted("Tags");
                     ImGui.Separator();
                     foreach (var t in v.Tags)
@@ -403,22 +346,27 @@ public class VenueListWindow : Window, IDisposable
                     // Data center / world / address
                     ImGui.AlignTextToFramePadding();
                     var rawAddress = v.Address ?? string.Empty;
-                    // If the saved address already starts with the world name, strip it to avoid duplication
                     var displayAddress = rawAddress.Trim();
-                    if (!string.IsNullOrEmpty(v.World) && !string.IsNullOrEmpty(displayAddress))
-                    {
-                        // remove a leading world name followed by optional punctuation/whitespace
-                        try
-                        {
-                            var pattern = "^" + Regex.Escape(v.World) + "\\s*[,>\\-–—]*\\s*";
-                            displayAddress = Regex.Replace(displayAddress, pattern, string.Empty, RegexOptions.IgnoreCase);
-                        }
-                        catch { /* ignore regex errors and leave address as-is */ }
-                    }
 
-                    // Normalize separators in the address to use ' > '
+                    // Normalize separators first so we can reliably inspect parts
                     displayAddress = Regex.Replace(displayAddress, "\\s*,\\s*", " > ");
                     displayAddress = Regex.Replace(displayAddress, "\\s*>\\s*", " > ");
+
+                    // If the saved address already includes the DC and/or World at the start,
+                    // strip those leading parts to avoid duplication when we prepend them below.
+                    if (!string.IsNullOrEmpty(displayAddress))
+                    {
+                        try
+                        {
+                            var parts = displayAddress.Split(new[] { '>' }, StringSplitOptions.RemoveEmptyEntries).Select(p => p.Trim()).ToList();
+                            if (!string.IsNullOrEmpty(v.DC) && parts.Count > 0 && string.Equals(parts[0], v.DC, StringComparison.OrdinalIgnoreCase))
+                                parts.RemoveAt(0);
+                            if (!string.IsNullOrEmpty(v.World) && parts.Count > 0 && string.Equals(parts[0], v.World, StringComparison.OrdinalIgnoreCase))
+                                parts.RemoveAt(0);
+                            displayAddress = string.Join(" > ", parts.Where(p => !string.IsNullOrEmpty(p)));
+                        }
+                        catch { /* leave displayAddress as-is on error */ }
+                    }
 
                     // If the stored address uses a generic "Apt 5" or "Subdiv 5" and includes a district
                     // (e.g. "Shirogane > Apt 5"), expand it to the district-specific title so listings show
@@ -435,15 +383,7 @@ public class VenueListWindow : Window, IDisposable
                             {
                                 var districtName = parts.Length >= 2 ? parts[^2] : string.Empty;
                                 // map district to apt/sub titles
-                                string aptTitle = string.Empty, subdivTitle = string.Empty;
-                                switch (districtName)
-                                {
-                                    case "Lavender Beds": aptTitle = "Lily Hills"; subdivTitle = "Lily Hills Sub"; break;
-                                    case "Mist": aptTitle = "Topmast"; subdivTitle = "Topmast Sub"; break;
-                                    case "The Goblet": aptTitle = "Sultana's Breath"; subdivTitle = "Sultana's Breath Sub"; break;
-                                    case "Empyreum": aptTitle = "Ingleside"; subdivTitle = "Ingleside Sub"; break;
-                                    case "Shirogane": aptTitle = "Kobai Goten"; subdivTitle = "Kobai Goten Sub"; break;
-                                }
+                                var (aptTitle, subdivTitle) = UiHelpers.GetTitlesForDistrictName(districtName);
                                 if (!string.IsNullOrEmpty(aptTitle) || !string.IsNullOrEmpty(subdivTitle))
                                 {
                                     if (mSub.Success && !string.IsNullOrEmpty(subdivTitle) && int.TryParse(mSub.Groups[1].Value, out var sn))
@@ -461,15 +401,74 @@ public class VenueListWindow : Window, IDisposable
                     }
                     catch { }
 
+                    // Ensure we display a sane world name — some stored listings may contain
+                    // Lumina row references instead of the plain world name. Prefer v.World
+                    // when it looks valid; otherwise try to extract a candidate from the
+                    // raw address and avoid duplicating it in the footer.
+                    var worldName = (v.World ?? string.Empty).Trim();
+                    var footerDistrict = string.Empty;
+
+                    // Split raw address into parts and drop any Lumina rowrefs
+                    var rawParts = rawAddress.Split(new[] { '>' }, StringSplitOptions.RemoveEmptyEntries).Select(p => p.Trim()).Where(p => !string.IsNullOrEmpty(p)).ToList();
+                    var cleanedParts = rawParts.Where(p => p.IndexOf("Lumina.Excel", StringComparison.OrdinalIgnoreCase) < 0).ToList();
+
+                    // If v.World is a Lumina rowref or empty, try to pick a candidate from cleanedParts
+                    if (string.IsNullOrWhiteSpace(worldName) || worldName.IndexOf("Lumina.Excel", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        int offset = 0;
+                        if (!string.IsNullOrEmpty(v.DC) && cleanedParts.Count > 0 && string.Equals(cleanedParts[0], v.DC, StringComparison.OrdinalIgnoreCase)) offset = 1;
+                        if (cleanedParts.Count > offset)
+                        {
+                            worldName = cleanedParts[offset];
+                        }
+                    }
+
+                    // Try to find a district candidate from cleanedParts after world
+                    try
+                    {
+                        var knownDistricts = new[] { "Lavender Beds", "Lav Beds", "Mist", "The Goblet", "Empyreum", "Shirogane" };
+                        int startIdx = 0;
+                        if (!string.IsNullOrEmpty(v.DC) && cleanedParts.Count > 0 && string.Equals(cleanedParts[0], v.DC, StringComparison.OrdinalIgnoreCase)) startIdx = 1;
+                        if (!string.IsNullOrEmpty(worldName) && cleanedParts.Count > startIdx && string.Equals(cleanedParts[startIdx], worldName, StringComparison.OrdinalIgnoreCase)) startIdx++;
+                        for (var i = startIdx; i < cleanedParts.Count; ++i)
+                        {
+                            var part = cleanedParts[i];
+                            if (knownDistricts.Any(d => string.Equals(d, part, StringComparison.OrdinalIgnoreCase) || string.Equals(UiHelpers.GetDistrictDisplay(d), part, StringComparison.OrdinalIgnoreCase)))
+                            {
+                                footerDistrict = knownDistricts.First(d => string.Equals(d, part, StringComparison.OrdinalIgnoreCase) || string.Equals(UiHelpers.GetDistrictDisplay(d), part, StringComparison.OrdinalIgnoreCase));
+                                break;
+                            }
+                        }
+                    }
+                    catch { }
+
+                    // Fallback defaults when detection fails
+                    if (string.IsNullOrWhiteSpace(worldName)) worldName = "Behemoth";
+                    if (string.IsNullOrWhiteSpace(footerDistrict)) footerDistrict = "Lavender Beds";
+
+                    // Remove leading DC/world/district from displayAddress to avoid duplication
+                    var toStrip = new[] { v.DC ?? string.Empty, worldName, footerDistrict }.Where(s => !string.IsNullOrEmpty(s)).ToList();
+                    foreach (var s in toStrip)
+                    {
+                        if (displayAddress.StartsWith(s, StringComparison.OrdinalIgnoreCase))
+                        {
+                            displayAddress = displayAddress.Substring(s.Length).TrimStart();
+                            if (displayAddress.StartsWith(">")) displayAddress = displayAddress.Substring(1).TrimStart();
+                        }
+                    }
+
                     var footer = string.Empty;
-                    if (string.IsNullOrWhiteSpace(displayAddress)) footer = $"{v.DC} > {v.World}";
-                    else footer = $"{v.DC} > {v.World} > {displayAddress}";
+                    if (string.IsNullOrWhiteSpace(displayAddress)) footer = $"{v.DC} > {worldName}";
+                    else footer = $"{v.DC} > {worldName} > {displayAddress}";
                     // Make the footer selectable so clicking it copies the full address to clipboard
                     if (ImGui.Selectable(footer))
                     {
                         ImGui.SetClipboardText(footer ?? string.Empty);
                         status = "Address copied to clipboard";
                     }
+
+                    // Small bottom padding to ensure the last lines don't get clipped by the card border
+                    ImGui.Dummy(new Vector2(0, 8));
                 }
                 finally
                 {

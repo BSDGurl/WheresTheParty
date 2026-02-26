@@ -33,36 +33,17 @@ public sealed class WTP : IDalamudPlugin
     {
         Configuration = PluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
 
-        // Determine path to icon image. Prefer data/icon.png but fall back to icon.png at assembly root.
         var assemblyDir = PluginInterface.AssemblyLocation.Directory?.FullName ?? string.Empty;
         var dataIconPath = Path.Combine(assemblyDir, "data", "icon.png");
         var rootIconPath = Path.Combine(assemblyDir, "icon.png");
-        var wtpImagePath = dataIconPath;
+        var wtpImagePath = File.Exists(dataIconPath) ? dataIconPath : (File.Exists(rootIconPath) ? rootIconPath : dataIconPath);
 
-        if (File.Exists(dataIconPath))
-        {
-            Log.Information($"Using data icon at {dataIconPath}");
-            wtpImagePath = dataIconPath;
-        }
-        else if (File.Exists(rootIconPath))
-        {
-            Log.Information($"Using root icon at {rootIconPath}");
-            wtpImagePath = rootIconPath;
-        }
-        else
-        {
-            Log.Warning($"Could not find icon at {dataIconPath} or {rootIconPath}. Ensure data/icon.png is present and marked CopyToOutputDirectory in the .csproj.");
-            // keep default path so callers attempting to read it will get a predictable path
-            wtpImagePath = dataIconPath;
-        }
-
-        // Shared service instance used by both windows so submissions and fetches operate on the same source/cache.
         var venueService = new VenueService(Configuration.VenueApiBaseUrl);
         VenueListWindow = new VenueListWindow(this, wtpImagePath, venueService);
         SubmitVenueWindow = new SubmitVenueWindow(this, venueService);
         WindowSystem.AddWindow(VenueListWindow);
         WindowSystem.AddWindow(SubmitVenueWindow);
-
+        // No custom font loading; use Unicode/private-use glyph fallbacks for icons.
         CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
             HelpMessage = "Open Where's the Party UI"
@@ -78,6 +59,8 @@ public sealed class WTP : IDalamudPlugin
 
         Log.Information($"===Some cool log messages from {PluginInterface.Manifest.Name}===");
     }
+
+        // No custom font loading; use Unicode/private-use glyph fallbacks for icons.
 
     public void Dispose()
     {
@@ -102,6 +85,7 @@ public sealed class WTP : IDalamudPlugin
 
     public void ToggleMainUi() => VenueListWindow.Toggle();
     public void ToggleSubmitUi() => _ = SubmitVenueWindow.OpenForCurrentUserAsync();
+
 
     // Allow other components to request a refresh of the venue list.
     public async Task RequestVenueRefreshAsync()
