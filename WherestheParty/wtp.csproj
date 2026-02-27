@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project Sdk="Dalamud.NET.Sdk/14.0.2">
-  <PropertyGroup Condition="'$(Configuration)'=='Release'">
+  <PropertyGroup>
     <PluginName>WheresTheParty</PluginName>
     <Author>BSDGurl</Author>
     <Description>Discover and share FFXIV venues in real time.</Description>
