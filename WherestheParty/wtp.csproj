@@ -1,22 +1,27 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project Sdk="Dalamud.NET.Sdk/14.0.2">
-  <PropertyGroup>
-    <PluginName>WheresTheParty</PluginName>
-    <Author>BSDGurl</Author>
-    <Description>Discover and share FFXIV venues in real time.</Description>
-    <Punchline>Find the party. Host the party.</Punchline>
-    <DalamudPackagerEnabled>true</DalamudPackagerEnabled>
-    <Version>0.0.1.0</Version>
-    <PackageProjectUrl>https://github.com/BSDGurl/WheresTheParty</PackageProjectUrl>
-    <PackageLicenseExpression>AGPL-3.0-or-later</PackageLicenseExpression>
-    <IsPackable>false</IsPackable>
-    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-  </PropertyGroup>
 
-  <ItemGroup>
-    <Content Include="data\icon.png">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <Visible>false</Visible>
-    </Content>
-  </ItemGroup>
+    <PropertyGroup>
+        <PluginName>WheresTheParty</PluginName>
+        <Author>BSDGurl</Author>
+        <Description>Discover and share FFXIV venues in real time.</Description>
+        <Punchline>Find the party. Host the party.</Punchline>
+        <Version>0.0.1.0</Version>
+        <DalamudPackagerEnabled>true</DalamudPackagerEnabled>
+        <PackageProjectUrl>https://github.com/BSDGurl/WheresTheParty</PackageProjectUrl>
+        <PackageLicenseExpression>AGPL-3.0-or-later</PackageLicenseExpression>
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    </PropertyGroup>
+
+    <PropertyGroup Condition="'$(Configuration)'=='Release'">
+        <IsPackable>false</IsPackable>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <Content Include="data\icon.png">
+            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+            <Visible>false</Visible>
+        </Content>
+    </ItemGroup>
+
 </Project>
