@@ -2,7 +2,7 @@
 <Project Sdk="Dalamud.NET.Sdk/14.0.2">
 
     <PropertyGroup>
-        <PluginName>WheresTheParty</PluginName>
+        <PluginName>Where's The Party</PluginName>
         <Author>BSDGurl</Author>
         <Description>Discover and share FFXIV venues in real time.</Description>
         <Punchline>Find the party. Host the party.</Punchline>
