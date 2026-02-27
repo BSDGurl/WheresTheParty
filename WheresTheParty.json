@@ -6,7 +6,7 @@
     "Punchline": "Find the fun, wherever it is.",
     "Description": "The party starts when you know where to go. Never miss another opening with your cross-world nightlife guide.",
     "ApplicableVersion": "any",
-    "DalamudApiLevel": 10,
+    "DalamudApiLevel": 14,
     "LoadPriority": 0,
     "Tags": [
         "Party Finder",
