@@ -20,7 +20,7 @@
     </PropertyGroup>
 
     <ItemGroup>
-        <ContentWithTargetPath Include="Images\icon.png">
+        <ContentWithTargetPath Include="Images/icon.png">
             <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
             <TargetPath>icon.png</TargetPath>
         </ContentWithTargetPath>
