@@ -34,7 +34,7 @@ public sealed class WTP : IDalamudPlugin
         Configuration = PluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
 
         var assemblyDir = PluginInterface.AssemblyLocation.Directory?.FullName ?? string.Empty;
-        var dataIconPath = Path.Combine(assemblyDir, "data", "icon.png");
+        var dataIconPath = Path.Combine(assemblyDir, "Images", "icon.png");
         var rootIconPath = Path.Combine(assemblyDir, "icon.png");
         var wtpImagePath = File.Exists(dataIconPath) ? dataIconPath : (File.Exists(rootIconPath) ? rootIconPath : dataIconPath);
 

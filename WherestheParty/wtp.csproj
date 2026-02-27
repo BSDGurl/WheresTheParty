@@ -18,10 +18,10 @@
     </PropertyGroup>
 
     <ItemGroup>
-        <Content Include="data\icon.png">
+        <ContentWithTargetPath Include="Images\icon.png">
             <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-            <Visible>false</Visible>
-        </Content>
+            <TargetPath>Images\icon.png</TargetPath>
+        </ContentWithTargetPath>
     </ItemGroup>
 
 </Project>
