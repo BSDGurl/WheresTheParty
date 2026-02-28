@@ -8,7 +8,7 @@
         <Author>BSDGurl</Author>
         <Description>Discover and share FFXIV venues in real time.</Description>
         <Punchline>Find the party. Host the party.</Punchline>
-        <Version>0.0.1.1</Version>
+        <Version>0.0.2.0</Version>
         <DalamudPackagerEnabled>true</DalamudPackagerEnabled>
         <PackageProjectUrl>https://github.com/BSDGurl/WheresTheParty</PackageProjectUrl>
         <PackageLicenseExpression>AGPL-3.0-or-later</PackageLicenseExpression>
