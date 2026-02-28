@@ -1,4 +1,5 @@
 using Dalamud.Configuration;
+using Dalamud.Plugin;
 using System;
 
 namespace WTP;
@@ -12,8 +13,16 @@ public class Configuration : IPluginConfiguration
     public bool SomePropertyToBeSavedAndWithADefault { get; set; } = true;
     public string VenueApiBaseUrl { get; set; } = "https://wtp-backend.bsdgurl.workers.dev";
 
+    // Store a reference to the plugin interface (DI-friendly)
+    private IDalamudPluginInterface? pluginInterface;
+
+    public void Initialize(IDalamudPluginInterface pluginInterface)
+    {
+        this.pluginInterface = pluginInterface;
+    }
+
     public void Save()
     {
-        WTP.PluginInterface.SavePluginConfig(this);
+        pluginInterface.SavePluginConfig(this);
     }
 }
