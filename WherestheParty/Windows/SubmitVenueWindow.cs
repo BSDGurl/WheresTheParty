@@ -1,5 +1,7 @@
 using System;
 using System.Numerics;
+using System.Text.Json;
+using System.Net.Http;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 using System.Linq;
@@ -30,8 +32,95 @@ public class SubmitVenueWindow : Window, IDisposable
     private int selectedSubdivision = -1;
     private string carrdUrl = string.Empty;
     private bool isCarrdValid = true;
-    private readonly string[] hourOptions = { "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12" };
-    private readonly string[] minuteOptions = { "00", "05", "10", "15", "20", "25", "30", "35", "40", "45", "50", "55" };
+    // One HttpClient is enough — anything else and the sockets go OVER 9000
+    private static readonly HttpClient httpClient = new HttpClient
+    {
+        Timeout = TimeSpan.FromSeconds(5)
+    };
+    // simple HEAD check to see if the URL actually responds
+    // Used to validate user-provided external URLs (e.g. Carrd) without downloading the body.
+    private async Task<bool> UrlExistsAsync(string url)
+    {
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Head, url);
+            using var response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+
+            return (int)response.StatusCode < 400;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    // Parse common server JSON error shapes into a concise, readable message.
+    // Looks for fields like `error`, `message`, `retryAfterSeconds`, `conflictOwner`, `conflictId`.
+    // Falls back to a trimmed raw body when parsing fails.
+    private static string FormatServerErrorDetails(int statusCode, string? respBody)
+    {
+        var body = respBody ?? string.Empty;
+        try
+        {
+            using var doc = JsonDocument.Parse(body);
+            var root = doc.RootElement;
+
+            string message = string.Empty;
+            if (root.TryGetProperty("error", out var err))
+                message = err.GetString() ?? string.Empty;
+            else if (root.TryGetProperty("message", out var msg))
+                message = msg.GetString() ?? string.Empty;
+            else
+                message = body.Trim();
+
+            var extras = new List<string>();
+
+            if (root.TryGetProperty("retryAfterSeconds", out var retryEl) && retryEl.ValueKind == JsonValueKind.Number)
+            {
+                var secs = retryEl.GetInt32();
+                if (secs >= 60)
+                {
+                    var mins = (int)Math.Ceiling(secs / 60.0);
+                    extras.Add($"Please try again in {mins} {(mins == 1 ? "minute" : "minutes")}");
+                }
+                else
+                {
+                    extras.Add($"Please try again in {secs} {(secs == 1 ? "second" : "seconds")}");
+                }
+            }
+
+            if (root.TryGetProperty("conflictOwner", out var conflictOwner))
+            {
+                var co = conflictOwner.GetString() ?? string.Empty;
+                if (!string.IsNullOrEmpty(co)) extras.Add($"Conflict: {co}");
+            }
+
+            if (root.TryGetProperty("conflictId", out var conflictId))
+            {
+                var cid = conflictId.GetString() ?? string.Empty;
+                if (!string.IsNullOrEmpty(cid)) extras.Add($"ID: {cid}");
+            }
+
+            var detail = message;
+            if (extras.Count > 0)
+                detail = detail + ". " + string.Join("; ", extras);
+
+            if (string.IsNullOrWhiteSpace(detail))
+                return body.Length > 300 ? body[..300] + "..." : body;
+
+            return detail;
+        }
+        catch
+        {
+            var trimmed = body.Replace("\r", "").Replace("\n", " ").Trim();
+            if (trimmed.Length > 300) trimmed = trimmed[..300] + "...";
+            return string.IsNullOrWhiteSpace(trimmed) ? "An unknown error occurred." : trimmed;
+        }
+    }
+
+    private static readonly string[] hourOptions12 = Enumerable.Range(1, 12).Select(i => i.ToString()).ToArray();
+    private static readonly string[] hourOptions24 = Enumerable.Range(0, 24).Select(i => i.ToString("D2")).ToArray();
+    private static readonly string[] minuteOptions = Enumerable.Range(0, 12).Select(i => (i * 5).ToString("D2")).ToArray();
     private string tags = string.Empty;
     private int lengthMinutes = 60;
     private string statusMessage = string.Empty;
@@ -92,6 +181,43 @@ public class SubmitVenueWindow : Window, IDisposable
     private int openMinute = 0;
     private int closeHour = 23;
     private int closeMinute = 0;
+    private Guid editingId = Guid.Empty;
+
+    // Helpers for minute rounding / conversion.
+    // UTC/local conversion and stored minute values stay consistent across the UI.
+    private static int RoundMinutesToNearest5(int minute)
+    {
+        var rm = (int)Math.Round(minute / 5.0) * 5;
+        return rm == 60 ? 0 : Math.Clamp(rm, 0, 55);
+    }
+
+    // Round a DateTime's minute value to the nearest 5 minutes and adjust hour if rounding rolls over.
+    // Returns (hour, minute) suitable for populating the UI controls.
+    private static (int hour, int minute) RoundDateTimeToNearest5(DateTime dt)
+    {
+        var rm = (int)Math.Round(dt.Minute / 5.0) * 5;
+        if (rm == 60)
+        {
+            dt = dt.AddHours(1);
+            rm = 0;
+        }
+        return (Math.Clamp(dt.Hour, 0, 23), Math.Clamp(rm, 0, 55));
+    }
+
+    // Convert a total-minute-of-day value into (hour, minute) with minutes rounded to nearest 5.
+    // Handles wrap-around when rounding pushes minutes to 60.
+    private static (int hour, int minute) FromTotalMinutesRounded(int totalMinutes)
+    {
+        var h = (totalMinutes / 60) % 24;
+        var m = totalMinutes % 60;
+        var rm = (int)Math.Round(m / 5.0) * 5;
+        if (rm == 60)
+        {
+            rm = 0;
+            h = (h + 1) % 24;
+        }
+        return (Math.Clamp(h, 0, 23), Math.Clamp(rm, 0, 55));
+    }
 
     public SubmitVenueWindow(
         WTP plugin,
@@ -112,7 +238,6 @@ public class SubmitVenueWindow : Window, IDisposable
         SizeConstraints = new WindowSizeConstraints
         {
             MinimumSize = new Vector2(800, 240),
-            // Increase maximum width slightly so the unit grid and controls have more room
             MaximumSize = new Vector2(800, float.MaxValue)
         };
 
@@ -125,6 +250,9 @@ public class SubmitVenueWindow : Window, IDisposable
 
     public void Dispose() { }
 
+    // Load venues from the server and populate the form with the current user's existing listing (if any).
+    // Matching prefers the explicit `CharacterId` field returned by the worker, and falls back to
+    // matching against the owner/name formats for backwards compatibility.
     public async Task OpenForCurrentUserAsync()
     {
         try
@@ -134,9 +262,16 @@ public class SubmitVenueWindow : Window, IDisposable
 
             var list = await venueService.FetchVenuesAsync();
             var existing = list.FirstOrDefault(v =>
-                !string.IsNullOrEmpty(v.Owner) &&
-                (v.Owner.Equals(charId, StringComparison.OrdinalIgnoreCase) ||
-                 v.Owner.Equals(charName, StringComparison.OrdinalIgnoreCase)));
+                // Prefer explicit CharacterId when available
+                (!string.IsNullOrEmpty(v.CharacterId) && !string.IsNullOrEmpty(charId) &&
+                    v.CharacterId.Equals(charId, StringComparison.OrdinalIgnoreCase))
+                // Fallback: owner string may contain the character name ("Name @ World")
+                || (!string.IsNullOrEmpty(v.Owner) && !string.IsNullOrEmpty(charName) &&
+                    v.Owner.IndexOf(charName, StringComparison.OrdinalIgnoreCase) >= 0)
+                // Also allow legacy owner equal to raw charId or charName
+                || (!string.IsNullOrEmpty(v.Owner) && !string.IsNullOrEmpty(charId) &&
+                    v.Owner.Equals(charId, StringComparison.OrdinalIgnoreCase))
+            );
 
             if (existing != null)
                 PopulateFromVenue(existing);
@@ -153,6 +288,9 @@ public class SubmitVenueWindow : Window, IDisposable
             Toggle();
     }
 
+    // Populate the submit form fields from a Venue instance. Prefers UTC opens/closes fields
+    // when available and converts them to local time for display. Also records the venue Id
+    // in `editingId` so subsequent submits update the same listing.
     private void PopulateFromVenue(Venue v)
     {
         name = v.Name ?? string.Empty;
@@ -193,14 +331,31 @@ public class SubmitVenueWindow : Window, IDisposable
         for (int i = 0; i < 7; i++)
             openDays[i] = (v.OpenDaysMask & (1 << i)) != 0;
 
-        openHour = v.OpenTimeMinutesLocal / 60;
-        openMinute = v.OpenTimeMinutesLocal % 60;
-        closeHour = v.CloseTimeMinutesLocal / 60;
-        closeMinute = v.CloseTimeMinutesLocal % 60;
+        // Prefer UTC times (they will be converted to the viewer's local time). Fall back to stored local-minute values.
+        if (v.OpensAtUtc != default && v.ClosesAtUtc != default)
+        {
+            try
+            {
+                var openLocal = v.OpensAtUtc.ToLocalTime();
+                var closeLocal = v.ClosesAtUtc.ToLocalTime();
+
+                (openHour, openMinute) = RoundDateTimeToNearest5(openLocal);
+                (closeHour, closeMinute) = RoundDateTimeToNearest5(closeLocal);
+            }
+            catch { }
+        }
+        else
+        {
+            (openHour, openMinute) = FromTotalMinutesRounded(v.OpenTimeMinutesLocal);
+            (closeHour, closeMinute) = FromTotalMinutesRounded(v.CloseTimeMinutesLocal);
+        }
 
         confirmWorld = string.Empty;
+        editingId = v.Id;
     }
 
+    // Reset the submit form to a blank/new state. Clears `editingId` so a new submit will create
+    // a fresh listing rather than update an existing one.
     private void ClearForm()
     {
         name = string.Empty;
@@ -225,6 +380,7 @@ public class SubmitVenueWindow : Window, IDisposable
         confirmWorld = string.Empty;
         submitting = false;
         statusMessage = string.Empty;
+        editingId = Guid.Empty;
     }
 
     public override void Draw()
@@ -310,7 +466,7 @@ public class SubmitVenueWindow : Window, IDisposable
 
     private void DrawAddressEditor()
     {
-        // --- Data Center ---
+        
         ImGui.TableNextRow();
         ImGui.TableSetColumnIndex(0);
         ImGui.Text("Data Center");
@@ -332,7 +488,7 @@ public class SubmitVenueWindow : Window, IDisposable
             ImGui.EndCombo();
         }
 
-        // --- World ---
+        
         ImGui.TableNextRow();
         ImGui.TableSetColumnIndex(0);
         ImGui.Text("World");
@@ -357,7 +513,7 @@ public class SubmitVenueWindow : Window, IDisposable
             ImGui.EndCombo();
         }
 
-        // --- District ---
+        
         ImGui.TableNextRow();
         ImGui.TableSetColumnIndex(0);
         ImGui.Text("District");
@@ -376,7 +532,7 @@ public class SubmitVenueWindow : Window, IDisposable
             ImGui.EndCombo();
         }
 
-        // --- Plot vs Apartment toggle ---
+        
         ImGui.TableNextRow();
         ImGui.TableSetColumnIndex(0);
         ImGui.Text("Address Type");
@@ -403,13 +559,12 @@ public class SubmitVenueWindow : Window, IDisposable
             {
                 plotMode = false;
 
-                // Ensure a default unit is selected
                 if (selectedApartment == -1 && selectedSubdivision == -1)
                     selectedApartment = 1;
             }
         }
 
-        // --- Plot Mode UI ---
+        
         if (plotMode)
         {
             ImGui.TableNextRow();
@@ -449,7 +604,7 @@ public class SubmitVenueWindow : Window, IDisposable
             }
         }
 
-        // --- Apartment Mode UI ---
+        
         if (useApartment)
         {
             ImGui.TableNextRow();
@@ -475,7 +630,7 @@ public class SubmitVenueWindow : Window, IDisposable
                 if (selectedSubdivision < 1) selectedSubdivision = 1;
             }
 
-            // --- Unit selector (bordered grid, fixed width 320px, 9x10) ---
+            
             ImGui.TableNextRow();
             ImGui.TableSetColumnIndex(0);
             ImGui.Text("Unit");
@@ -483,32 +638,25 @@ public class SubmitVenueWindow : Window, IDisposable
             ImGui.TableSetColumnIndex(1);
             ImGui.PushItemWidth(ImGui.GetContentRegionAvail().X);
 
-            // Child sized to available width minus a small gutter so the right border is visible.
             var availW = ImGui.GetContentRegionAvail().X;
             var styleLocal = ImGui.GetStyle();
             var gutter = Math.Max(4f, styleLocal.WindowPadding.X);
-            // make the child a bit wider ( +5px ) but never exceed availW
+
             var baseWidth = Math.Max(120f, availW - gutter);
             float gridWidth = Math.Min(availW, baseWidth + 5f);
 
-            // Force a clean 10x9 grid and avoid table borders so there are no divider lines.
             int columns = 10;
             int current = isSub ? selectedSubdivision : selectedApartment;
 
-            // Compute child height to exactly fit 9 rows (90 items / 10 columns)
             int totalUnits = 90;
-            int rows = (int)Math.Ceiling(totalUnits / (float)columns); // should be 9
+            int rows = (int)Math.Ceiling(totalUnits / (float)columns);
             var style2 = ImGui.GetStyle();
             float itemH = ImGui.GetFrameHeight();
             float spacingY = style2.ItemSpacing.Y;
-            // Reduce inner padding slightly and compute a tighter child height so there's less gap below the grid
-            float childPadY = 1f; // matches pushed WindowPadding Y below
-            // Compute child height to exactly fit rows so no vertical scrollbar is needed
-            // Subtract a small fudge to avoid extra bottom gap
+            float childPadY = 1f; 
             float gridHeight = rows * itemH + Math.Max(0, rows - 1) * spacingY + (childPadY * 2f) - 8f;
             if (gridHeight < 100f) gridHeight = 100f;
 
-            // Disable mouse-wheel scrolling and hide the scrollbar to prevent scrolling interaction
             ImGui.BeginChild("UnitGridFrame", new Vector2(gridWidth, gridHeight), true,
                 ImGuiWindowFlags.NoScrollWithMouse | ImGuiWindowFlags.NoScrollbar);
             ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(childPadY, childPadY));
@@ -536,26 +684,24 @@ public class SubmitVenueWindow : Window, IDisposable
                 ImGui.EndTable();
             }
 
-            ImGui.PopStyleVar(2); // ItemSpacing + FramePadding
-            ImGui.PopStyleVar();  // WindowPadding
+            ImGui.PopStyleVar(2); 
+            ImGui.PopStyleVar(); 
 
             ImGui.EndChild();
 
-            // bottom padding removed to tighten spacing
 
             ImGui.PopItemWidth();
         }
 
-        // Always update preview
         address = ComposeAddress();
     }
 
+    // Compose the readable address string from the selected DC/world/district and plot/apartment selections.
     private string ComposeAddress()
     {
         var dc = dataCenters.ElementAtOrDefault(selectedDcIndex) ?? string.Empty;
         var district = housingDistricts.ElementAtOrDefault(selectedDistrictIndex) ?? string.Empty;
 
-        // Apartment building names
         string aptTitle = string.Empty;
         string subdivTitle = string.Empty;
 
@@ -585,7 +731,7 @@ public class SubmitVenueWindow : Window, IDisposable
 
         var parts = new List<string> { dc, world, district };
 
-        // Apartment mode
+        
         if (useApartment)
         {
             if (selectedSubdivision != -1)
@@ -598,14 +744,13 @@ public class SubmitVenueWindow : Window, IDisposable
             }
             else
             {
-                // fallback to plot
                 parts.Add($"W{selectedWard}");
                 parts.Add($"P{selectedPlot}");
             }
         }
         else
         {
-            // Plot mode
+        
             parts.Add($"W{selectedWard}");
             parts.Add($"P{selectedPlot}");
         }
@@ -613,7 +758,10 @@ public class SubmitVenueWindow : Window, IDisposable
         return string.Join(" > ", parts.Where(p => !string.IsNullOrEmpty(p)));
     }
 
-    private void DrawCarrd()
+    // Validate Carrd URL by checking if it exists. This is not a guarantee of validity, but it can catch obvious mistakes.
+    // Draw the Carrd URL input and kick off async validation checks. The validation is best-effort
+    // (HEAD request) and only used to indicate obvious mistakes to the user.
+    private async void DrawCarrd()
     {
         ImGui.TableNextRow();
         ImGui.TableSetColumnIndex(0);
@@ -623,28 +771,38 @@ public class SubmitVenueWindow : Window, IDisposable
         ImGui.SetNextItemWidth(ImGui.GetContentRegionAvail().X);
         ImGui.InputText("##CarrdUrl", ref carrdUrl, 256);
 
-        // Validate carrd url if present
-        if (string.IsNullOrWhiteSpace(carrdUrl))
+        string tmp = carrdUrl?.Trim() ?? "";
+        if (!string.IsNullOrWhiteSpace(tmp) && !Regex.IsMatch(tmp, @"^[a-zA-Z][a-zA-Z0-9+.-]*:"))
+            tmp = "https://" + tmp;
+
+        if (lastCarrdChecked != tmp)
         {
-            isCarrdValid = true;
-        }
-        else
-        {
-            var tmp = carrdUrl.Trim();
-            if (!Regex.IsMatch(tmp, "^[a-zA-Z][a-zA-Z0-9+.-]*:"))
-                tmp = "https://" + tmp;
-            if (Uri.TryCreate(tmp, UriKind.Absolute, out var uri) && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps))
-                isCarrdValid = true;
-            else
-                isCarrdValid = false;
+            lastCarrdChecked = tmp;
+            _ = ValidateCarrdAsync(tmp);
         }
 
         if (!isCarrdValid)
         {
-            ImGui.TextColored(new Vector4(1f, 0.35f, 0.35f, 1f), "Please enter a valid URL (http/https).");
+            ImGui.TextColored(new Vector4(1f, 0.35f, 0.35f, 1f),
+                "This URL does not appear to exist.");
         }
     }
 
+    private string lastCarrdChecked = "";
+    // Validate that the given URL responds to a HEAD request. Sets `isCarrdValid` used by the UI.
+    private async Task ValidateCarrdAsync(string url)
+    {
+        if (string.IsNullOrWhiteSpace(url))
+        {
+            isCarrdValid = true;
+            return;
+        }
+
+        isCarrdValid = await UrlExistsAsync(url);
+    }
+
+    // Render the schedule controls (open days, open/close times). Uses local variables
+    // `openHour/openMinute` and `closeHour/closeMinute` which come from PopulateFromVenue or user input.
     private void DrawSchedule()
     {
         ImGui.TableNextRow();
@@ -661,32 +819,53 @@ public class SubmitVenueWindow : Window, IDisposable
         }
         ImGui.NewLine();
 
-        //
-        // OPEN TIME
-        //
+        
         ImGui.TableNextRow();
         ImGui.TableSetColumnIndex(0);
         ImGui.Text("Open Time");
 
         ImGui.TableSetColumnIndex(1);
 
-        // Hour
         ImGui.SetNextItemWidth(80f);
-        if (ImGui.BeginCombo("##OpenHour", hourOptions[openHour % 12]))
+        if (configuration.Use24HourClock)
         {
-            for (int i = 0; i < hourOptions.Length; i++)
+            // 24-hour clock for those who complained about AM/PM.
+            var idx = Math.Clamp(openHour, 0, 23);
+            if (ImGui.BeginCombo("##OpenHour", hourOptions24[idx]))
             {
-                bool sel = (i == openHour % 12);
-                if (ImGui.Selectable(hourOptions[i], sel))
-                    openHour = (openHour >= 12 ? 12 : 0) + i;
-                if (sel) ImGui.SetItemDefaultFocus();
+                for (int i = 0; i < hourOptions24.Length; i++)
+                {
+                    bool sel = (i == idx);
+                    if (ImGui.Selectable(hourOptions24[i], sel))
+                        openHour = i;
+                    if (sel) ImGui.SetItemDefaultFocus();
+                }
+                ImGui.EndCombo();
             }
-            ImGui.EndCombo();
+        }
+        else
+        {
+            // 12-hour Clock, for everyone else.
+            var openHourIndex = (openHour + 11) % 12;
+            if (ImGui.BeginCombo("##OpenHour", hourOptions12[openHourIndex]))
+            {
+                for (int i = 0; i < hourOptions12.Length; i++)
+                {
+                    bool sel = (i == openHourIndex);
+                    if (ImGui.Selectable(hourOptions12[i], sel))
+                    {
+                        var isPm = openHour >= 12;
+                        openHour = (isPm ? 12 : 0) + ((i + 1) % 12);
+                    }
+                    if (sel) ImGui.SetItemDefaultFocus();
+                }
+                ImGui.EndCombo();
+            }
         }
 
         ImGui.SameLine();
 
-        // Minute
+        
         ImGui.SetNextItemWidth(80f);
         if (ImGui.BeginCombo("##OpenMinute", minuteOptions[openMinute / 5]))
         {
@@ -702,41 +881,60 @@ public class SubmitVenueWindow : Window, IDisposable
 
         ImGui.SameLine();
 
-        // AM/PM
-        bool openPm = openHour >= 12;
-        if (ImGui.RadioButton("AM", !openPm)) openHour %= 12;
-        ImGui.SameLine();
-        if (ImGui.RadioButton("PM", openPm)) openHour = (openHour % 12) + 12;
+        
+        if (!configuration.Use24HourClock)
+        {
+            bool openPm = openHour >= 12;
+            if (ImGui.RadioButton("AM##Open", !openPm)) openHour %= 12;
+            ImGui.SameLine();
+            if (ImGui.RadioButton("PM##Open", openPm)) openHour = (openHour % 12) + 12;
+        }
 
-        ImGui.PopItemWidth();   // ← FIX
-
-
-        //
-        // CLOSE TIME
-        //
+        
         ImGui.TableNextRow();
         ImGui.TableSetColumnIndex(0);
         ImGui.Text("Close Time");
 
         ImGui.TableSetColumnIndex(1);
 
-        // Hour
         ImGui.SetNextItemWidth(80f);
-        if (ImGui.BeginCombo("##CloseHour", hourOptions[closeHour % 12]))
+        if (configuration.Use24HourClock)
         {
-            for (int i = 0; i < hourOptions.Length; i++)
+            var idx = Math.Clamp(closeHour, 0, 23);
+            if (ImGui.BeginCombo("##CloseHour", hourOptions24[idx]))
             {
-                bool sel = (i == closeHour % 12);
-                if (ImGui.Selectable(hourOptions[i], sel))
-                    closeHour = (closeHour >= 12 ? 12 : 0) + i;
-                if (sel) ImGui.SetItemDefaultFocus();
+                for (int i = 0; i < hourOptions24.Length; i++)
+                {
+                    bool sel = (i == idx);
+                    if (ImGui.Selectable(hourOptions24[i], sel))
+                        closeHour = i;
+                    if (sel) ImGui.SetItemDefaultFocus();
+                }
+                ImGui.EndCombo();
             }
-            ImGui.EndCombo();
+        }
+        else
+        {
+            var closeHourIndex = (closeHour + 11) % 12;
+            if (ImGui.BeginCombo("##CloseHour", hourOptions12[closeHourIndex]))
+            {
+                for (int i = 0; i < hourOptions12.Length; i++)
+                {
+                    bool sel = (i == closeHourIndex);
+                    if (ImGui.Selectable(hourOptions12[i], sel))
+                    {
+                        var isPm = closeHour >= 12;
+                        closeHour = (isPm ? 12 : 0) + ((i + 1) % 12);
+                    }
+                    if (sel) ImGui.SetItemDefaultFocus();
+                }
+                ImGui.EndCombo();
+            }
         }
 
         ImGui.SameLine();
 
-        // Minute
+        
         ImGui.SetNextItemWidth(80f);
         if (ImGui.BeginCombo("##CloseMinute", minuteOptions[closeMinute / 5]))
         {
@@ -752,13 +950,14 @@ public class SubmitVenueWindow : Window, IDisposable
 
         ImGui.SameLine();
 
-        // AM/PM
-        bool closePm = closeHour >= 12;
-        if (ImGui.RadioButton("AM", !closePm)) closeHour %= 12;
-        ImGui.SameLine();
-        if (ImGui.RadioButton("PM", closePm)) closeHour = (closeHour % 12) + 12;
-
-        ImGui.PopItemWidth();   // ← FIX
+        
+        if (!configuration.Use24HourClock)
+        {
+            bool closePm = closeHour >= 12;
+            if (ImGui.RadioButton("AM##Close", !closePm)) closeHour %= 12;
+            ImGui.SameLine();
+            if (ImGui.RadioButton("PM##Close", closePm)) closeHour = (closeHour % 12) + 12;
+        }
     }
 
     private void DrawTags()
@@ -776,7 +975,7 @@ public class SubmitVenueWindow : Window, IDisposable
     {
         ImGui.TableNextRow();
         ImGui.TableSetColumnIndex(0);
-        ImGui.Text("Length (minutes)");
+        ImGui.Text("Length (minutes) 8hrs Max");
 
         ImGui.TableSetColumnIndex(1);
         ImGui.SetNextItemWidth(ImGui.GetContentRegionAvail().X);
@@ -910,6 +1109,8 @@ public class SubmitVenueWindow : Window, IDisposable
         }
     }
 
+    // Build a Venue from the form, request a short-lived token, and POST the venue to the server.
+    // On success the server id is captured to `editingId` so future submits update the same listing.
     private async Task SubmitAsync()
     {
         if (submitting)
@@ -958,6 +1159,22 @@ public class SubmitVenueWindow : Window, IDisposable
             v.OpenTimeMinutesLocal = openHour * 60 + openMinute;
             v.CloseTimeMinutesLocal = closeHour * 60 + closeMinute;
 
+            // Record absolute UTC times based on the submitter's local system date/time so viewers
+            // in other timezones can convert correctly. If the close time is earlier or equal to
+            // the open time, assume it crosses midnight and add a day to the close time.
+            try
+            {
+                var todayLocal = DateTime.Today;
+                var openLocalDt = DateTime.SpecifyKind(todayLocal.AddMinutes(v.OpenTimeMinutesLocal), DateTimeKind.Local);
+                var closeLocalDt = DateTime.SpecifyKind(todayLocal.AddMinutes(v.CloseTimeMinutesLocal), DateTimeKind.Local);
+                if (closeLocalDt <= openLocalDt)
+                    closeLocalDt = closeLocalDt.AddDays(1);
+
+                v.OpensAtUtc = openLocalDt.ToUniversalTime();
+                v.ClosesAtUtc = closeLocalDt.ToUniversalTime();
+            }
+            catch { }
+
             WifiOption wifi = WifiOption.None;
             if (wifiLightless) wifi |= WifiOption.Lightless;
             if (wifiPlayerSync) wifi |= WifiOption.PlayerSync;
@@ -975,6 +1192,12 @@ public class SubmitVenueWindow : Window, IDisposable
             var charName = identityService.GetCharacterName() ?? string.Empty;
             var tokenWorld = identityService.GetWorldName() ?? v.World ?? string.Empty;
 
+            // Preserve character id for server-side matching and set Id when editing
+            v.CharacterId = string.IsNullOrWhiteSpace(charId) ? string.Empty : charId;
+            if (editingId != Guid.Empty)
+                v.Id = editingId;
+
+            // Owner will be normalized by the server to the form "Name @ World".
             v.Owner = string.IsNullOrEmpty(charId) ? charName : charId;
 
             if (string.IsNullOrWhiteSpace(confirmWorld) ||
@@ -996,9 +1219,7 @@ public class SubmitVenueWindow : Window, IDisposable
 
             if (!tokenOk || string.IsNullOrEmpty(tokenStr))
             {
-                var body = (tokenBody ?? string.Empty).Replace("\r", "").Replace("\n", " ").Trim();
-                if (body.Length > 300) body = body[..300] + "...";
-                statusMessage = $"Token request failed ({tokenStatus}): {body}";
+                statusMessage = $"Token request failed ({tokenStatus}): {FormatServerErrorDetails(tokenStatus, tokenBody)}";
                 return;
             }
 
@@ -1007,11 +1228,26 @@ public class SubmitVenueWindow : Window, IDisposable
 
             if (!ok)
             {
-                var body = (respBody ?? string.Empty).Replace("\r", "").Replace("\n", " ").Trim();
-                if (body.Length > 300) body = body[..300] + "...";
-                statusMessage = $"Submit failed ({statusCode}): {body}";
+                statusMessage = $"Submission Failed ({statusCode}): {FormatServerErrorDetails(statusCode, respBody)}";
                 return;
             }
+
+            // Try to extract returned id and set editingId so subsequent edits update the same listing
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(respBody))
+                {
+                    using var doc = JsonDocument.Parse(respBody);
+                    var root = doc.RootElement;
+                    if (root.TryGetProperty("id", out var idEl) && idEl.ValueKind == JsonValueKind.String)
+                    {
+                        var idStr = idEl.GetString();
+                        if (Guid.TryParse(idStr, out var gid))
+                            editingId = gid;
+                    }
+                }
+            }
+            catch { }
 
             statusMessage = "Venue submitted successfully.";
             await plugin.RequestVenueRefreshAsync();

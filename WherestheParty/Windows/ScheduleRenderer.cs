@@ -27,19 +27,23 @@ internal static class ScheduleRenderer
 
                 // Show time range in viewer local time if UTC times are present, otherwise use stored local minutes as fallback
                 string timeText = string.Empty;
+                var cfg = WTP.PluginInterface.GetPluginConfig() as Configuration;
+                var use24 = cfg?.Use24HourClock ?? false;
+                var fmt = use24 ? "HH:mm" : "h:mm tt";
+
                 if (v.OpensAtUtc != default && v.ClosesAtUtc != default)
                 {
                     var openLocal = v.OpensAtUtc.ToLocalTime();
                     var closeLocal = v.ClosesAtUtc.ToLocalTime();
-                    timeText = $"{openLocal:h:mm tt} - {closeLocal:h:mm tt}";
+                    timeText = $"{openLocal.ToString(fmt)} - {closeLocal.ToString(fmt)}";
                 }
                 else
                 {
-                    var openMinutes = Math.Max(0, v.OpenTimeMinutesLocal % (24*60));
-                    var closeMinutes = Math.Max(0, v.CloseTimeMinutesLocal % (24*60));
+                    var openMinutes = Math.Max(0, v.OpenTimeMinutesLocal % (24 * 60));
+                    var closeMinutes = Math.Max(0, v.CloseTimeMinutesLocal % (24 * 60));
                     var openDt = DateTime.Today.AddMinutes(openMinutes);
                     var closeDt = DateTime.Today.AddMinutes(closeMinutes);
-                    timeText = $"{openDt:h:mm tt} - {closeDt:h:mm tt}";
+                    timeText = $"{openDt.ToString(fmt)} - {closeDt.ToString(fmt)}";
                 }
 
                 ImGui.Separator();

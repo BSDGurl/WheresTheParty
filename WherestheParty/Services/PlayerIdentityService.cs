@@ -52,7 +52,6 @@ public class PlayerIdentityService
     {
         try
         {
-            // Modern, non-obsolete source of content ID
             var id = playerState.ContentId;
             return id != 0 ? id.ToString() : null;
         }
