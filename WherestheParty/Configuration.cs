@@ -12,6 +12,8 @@ public class Configuration : IPluginConfiguration
     public bool IsConfigWindowMovable { get; set; } = true;
     public bool SomePropertyToBeSavedAndWithADefault { get; set; } = true;
     public string VenueApiBaseUrl { get; set; } = "https://wtp-backend.bsdgurl.workers.dev";
+    public bool Use24HourClock { get; set; } = false;
+    public bool AutoRefreshEnabled { get; set; } = true;
 
     // Store a reference to the plugin interface (DI-friendly)
     private IDalamudPluginInterface? pluginInterface;

@@ -14,7 +14,7 @@ namespace WTP.Windows;
 
 public class VenueListWindow : Window, IDisposable
 {
-    private readonly string wtpImagePath;
+    
     private readonly WTP plugin;
     private readonly VenueService venueService;
 
@@ -26,14 +26,13 @@ public class VenueListWindow : Window, IDisposable
 
     private Dictionary<string, bool> dcFilters = new();
     private Dictionary<string, bool> tagFilters = new();
-    private readonly List<string> initialDcList = new();
+    
 
     private bool showFiltersWindow = false;
-    private bool autoRefresh = true;
     private DateTime lastAutoRefresh = DateTime.UtcNow;
     private readonly TimeSpan autoRefreshInterval = TimeSpan.FromSeconds(30);
 
-    public VenueListWindow(WTP plugin, string wtpImagePath, VenueService venueService, PlayerIdentityService identityService)
+    public VenueListWindow(WTP plugin, VenueService venueService, PlayerIdentityService identityService)
             : base("Where's the Party##VenueListWindow", ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
     {
         SizeConstraints = new WindowSizeConstraints
@@ -43,7 +42,6 @@ public class VenueListWindow : Window, IDisposable
         };
 
         this.plugin = plugin;
-        this.wtpImagePath = wtpImagePath;
         this.venueService = venueService;
 
         var knownDcs = new[]
@@ -51,8 +49,7 @@ public class VenueListWindow : Window, IDisposable
             "Aether", "Crystal", "Dynamis", "Primal", "Chaos", "Light",
             "Materia", "Elemental", "Gaia", "Mana", "Meteor"
         };
-
-        this.initialDcList.AddRange(knownDcs);
+        // populate DC filters from known data centers
         foreach (var dc in knownDcs)
             dcFilters[dc] = true;
     }
@@ -63,19 +60,11 @@ public class VenueListWindow : Window, IDisposable
 
     public override void Draw()
     {
-        // Auto-refresh toggle and status
-        ImGui.Text($"Auto Refresh is {(autoRefresh ? "Enabled" : "Disabled")}");
-        ImGui.SameLine();
-        var arLocal = autoRefresh;
-        if (ImGui.Checkbox("Auto Refresh##Enable", ref arLocal))
-        {
-            autoRefresh = arLocal;
-            if (autoRefresh)
-                lastAutoRefresh = DateTime.UtcNow;
-        }
+        var cfg = plugin.Configuration;
+        ImGui.Text($"Auto Refresh is {(cfg.AutoRefreshEnabled ? "Enabled" : "Disabled")}");
 
-        // Refresh button (Unicode icons, no custom font)
-        var icon = loading ? "" : ""; // hourglass vs clockwise arrow
+        
+        var icon = loading ? "" : "";
         if (UiHelpers.IconButton("Refresh", icon))
         {
             if (!loading)
@@ -90,7 +79,7 @@ public class VenueListWindow : Window, IDisposable
             plugin.ToggleSubmitUi();
         }
 
-        // Filters button aligned to the right
+        
         ImGui.SameLine();
         var contentMax = ImGui.GetWindowContentRegionMax().X;
         var filtersBtnWidth = 100f;
@@ -98,7 +87,7 @@ public class VenueListWindow : Window, IDisposable
         if (ImGui.Button("Filters", new Vector2(filtersBtnWidth, 0f)))
             showFiltersWindow = true;
 
-        // Filters window
+        
         if (showFiltersWindow)
         {
             ImGui.SetNextWindowSize(new Vector2(520, 360), ImGuiCond.Appearing);
@@ -109,7 +98,7 @@ public class VenueListWindow : Window, IDisposable
                 var leftWidth = 240f;
                 var rightWidth = 240f;
 
-                // Left: DC filters
+                
                 ImGui.PushID("DCColumn");
                 ImGui.BeginChild("DCChild", new Vector2(leftWidth, 0), true);
                 ImGui.TextUnformatted("Data Centers");
@@ -145,7 +134,7 @@ public class VenueListWindow : Window, IDisposable
 
                 ImGui.NextColumn();
 
-                // Right: Tag filters
+                
                 ImGui.PushID("TagColumn");
                 ImGui.BeginChild("TagChild", new Vector2(rightWidth, 0), true);
                 ImGui.TextUnformatted("Tags");
@@ -184,15 +173,15 @@ public class VenueListWindow : Window, IDisposable
         ImGui.TextColored(new Vector4(0.7f, 0.7f, 0.7f, 1f), status);
         ImGui.Spacing();
 
-        // Lazy initial fetch
+        
         if (!fetchedOnce && !loading)
         {
             fetchedOnce = true;
             _ = RefreshAsync();
         }
 
-        // Auto-refresh
-        if (autoRefresh && !loading)
+        
+        if (plugin.Configuration.AutoRefreshEnabled && !loading)
         {
             if ((DateTime.UtcNow - lastAutoRefresh) >= autoRefreshInterval)
             {
@@ -201,7 +190,6 @@ public class VenueListWindow : Window, IDisposable
             }
         }
 
-        // Venue list
         ImGui.BeginChild("VenueListChild", Vector2.Zero, true, ImGuiWindowFlags.None);
         {
             if (loading)
@@ -251,7 +239,7 @@ public class VenueListWindow : Window, IDisposable
                     ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
                 try
                 {
-                    // Title row: name + Carrd + Wi-Fi badge
+                    
                     var nameSize = ImGui.CalcTextSize(v.Name);
                     ImGui.TextColored(new Vector4(0.98f, 0.8f, 0.16f, 1f), v.Name);
 
@@ -264,7 +252,7 @@ public class VenueListWindow : Window, IDisposable
                             ImGui.OpenPopup($"ConfirmOpenCarrd_{v.Id}");
                         }
 
-                        // Confirmation modal per-venue
+                        
                         if (ImGui.BeginPopupModal($"ConfirmOpenCarrd_{v.Id}", ImGuiWindowFlags.AlwaysAutoResize))
                         {
                             var display = string.IsNullOrWhiteSpace(carrdUrl) ? "(empty)" : carrdUrl.Trim();
@@ -300,7 +288,7 @@ public class VenueListWindow : Window, IDisposable
                         }
                     }
 
-                    // Wi-Fi badge aligned to the right
+                    
                     var innerContentMax = ImGui.GetWindowContentRegionMax().X;
                     var reserved = nameSize.X + 20f;
                     ImGui.SameLine();
@@ -312,7 +300,7 @@ public class VenueListWindow : Window, IDisposable
                     }
                     ImGui.PopStyleColor();
 
-                    // Wi-Fi popup
+                    
                     if (ImGui.BeginPopup($"WifiPopup_{v.Id}"))
                     {
                         ImGui.TextUnformatted("Syncshell credentials");
@@ -377,12 +365,12 @@ public class VenueListWindow : Window, IDisposable
                         ImGui.EndPopup();
                     }
 
-                    // Schedule (submitter local → viewer local handled by ScheduleRenderer)
+                    
                     ScheduleRenderer.RenderSchedule(v);
 
                     ImGui.Spacing();
 
-                    // Description + tags columns
+                    
                     ImGui.Columns(2);
                     ImGui.SetColumnWidth(0, ImGui.GetWindowContentRegionMax().X * 0.7f);
 
@@ -446,7 +434,11 @@ public class VenueListWindow : Window, IDisposable
                 .OrderBy(s => s)
                 .ToList();
 
-            var effectiveDcs = dcs.Count > 0 ? dcs : this.initialDcList;
+            var effectiveDcs = dcs.Count > 0 ? dcs : new List<string>
+            {
+                "Aether", "Crystal", "Dynamis", "Primal", "Chaos", "Light",
+                "Materia", "Elemental", "Gaia", "Mana", "Meteor"
+            };
             var newFilters = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
             foreach (var dc in effectiveDcs)
             {

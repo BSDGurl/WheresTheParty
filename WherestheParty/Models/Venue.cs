@@ -18,6 +18,10 @@ public partial class Venue
     public DateTime ClosesAtUtc { get; set; }
 
     public string Owner { get; set; } = string.Empty;
+    // CharacterId is persisted by the worker to allow reliable owner matching
+    // (the owner string may include the world). Add this so the client can
+    // identify a user's existing listing.
+    public string CharacterId { get; set; } = string.Empty;
     public string Description { get; set; } = string.Empty;
 
     public DateTime LastUpdatedUtc { get; set; }
